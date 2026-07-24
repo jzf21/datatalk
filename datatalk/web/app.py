@@ -17,7 +17,8 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from datatalk.agent.analyze import analyze_report
+from datatalk.agent.analyze import analyze_dashboard, analyze_report
+from datatalk.agent.dashboard import generate_dashboard
 from datatalk.agent.qa import answer_question
 from datatalk.agent.report import generate_report
 from datatalk.config import get_settings
@@ -48,6 +49,16 @@ class ReportRequest(BaseModel):
 class AnalyzeRequest(BaseModel):
     report_id: int | None = None
     text: str | None = None
+    focus: str | None = None
+    use_memory: bool = True
+
+
+class DashboardRequest(BaseModel):
+    request: str
+    use_memory: bool = True
+
+
+class DashboardAnalyzeRequest(BaseModel):
     focus: str | None = None
     use_memory: bool = True
 
@@ -167,6 +178,112 @@ def report(req: ReportRequest) -> StreamingResponse:
         yield _ndjson("done", {})
 
     return StreamingResponse(stream(), media_type="application/x-ndjson")
+
+
+# --- dashboards (streaming NDJSON) ---
+
+@app.post("/api/dashboard")
+def dashboard(req: DashboardRequest) -> StreamingResponse:
+    if not req.request.strip():
+        raise HTTPException(status_code=400, detail="Empty request.")
+
+    store = _store()
+    suggestions: list[str] = []
+    if req.use_memory:
+        try:
+            suggestions = store.retrieve_suggestion_texts(req.request, k=5)
+        except Exception:  # noqa: BLE001 - memory is best-effort
+            suggestions = []
+
+    def stream():
+        q: queue.Queue = queue.Queue()
+        holder: dict[str, Any] = {}
+
+        def on_event(kind: str, data: dict[str, Any]) -> None:
+            q.put((kind, data))
+
+        def worker() -> None:
+            try:
+                holder["result"] = generate_dashboard(
+                    req.request, memory_suggestions=suggestions, on_event=on_event
+                )
+            except Exception as exc:  # noqa: BLE001
+                holder["error"] = str(exc)
+            finally:
+                q.put(None)
+
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+
+        if suggestions:
+            yield _ndjson("memory", {"count": len(suggestions), "suggestions": suggestions})
+
+        while True:
+            item = q.get()
+            if item is None:
+                break
+            yield _ndjson(item[0], item[1])
+
+        t.join()
+        if "result" in holder:
+            res = holder["result"]
+            saved = store.save_dashboard(req.request, res.document, res.queries)
+            yield _ndjson(
+                "saved",
+                {"dashboard_id": saved.id, "queries": res.queries, "steps": res.steps},
+            )
+        elif "error" in holder:
+            yield _ndjson("error", {"message": holder["error"]})
+        yield _ndjson("done", {})
+
+    return StreamingResponse(stream(), media_type="application/x-ndjson")
+
+
+@app.post("/api/dashboards/{dashboard_id}/analyze")
+def analyze_dashboard_endpoint(dashboard_id: int, req: DashboardAnalyzeRequest) -> dict[str, Any]:
+    store = _store()
+    saved = store.get_dashboard(dashboard_id)
+    if not saved:
+        raise HTTPException(status_code=404, detail="Dashboard not found.")
+    suggestions = (
+        store.retrieve_suggestion_texts(saved.request[:2000], k=3)
+        if req.use_memory else []
+    )
+    try:
+        analysis = analyze_dashboard(
+            saved.document, focus=req.focus, memory_suggestions=suggestions
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=str(exc))
+    store.set_dashboard_analysis(dashboard_id, analysis)
+    return {"analysis": analysis}
+
+
+@app.get("/api/dashboards")
+def list_dashboards() -> dict[str, Any]:
+    items = _store().list_dashboards()
+    return {
+        "dashboards": [
+            {"id": d.id, "request": d.request, "title": d.title, "created_at": d.created_at}
+            for d in items
+        ]
+    }
+
+
+@app.get("/api/dashboards/{dashboard_id}")
+def get_dashboard(dashboard_id: int) -> dict[str, Any]:
+    d = _store().get_dashboard(dashboard_id)
+    if not d:
+        raise HTTPException(status_code=404, detail="Dashboard not found.")
+    return {
+        "id": d.id,
+        "request": d.request,
+        "title": d.title,
+        "document": d.document.to_dict(),
+        "queries": d.queries,
+        "analysis": d.analysis,
+        "created_at": d.created_at,
+    }
 
 
 # --- Q&A about a report (streaming NDJSON) ---
