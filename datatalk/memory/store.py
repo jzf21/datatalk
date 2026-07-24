@@ -50,6 +50,17 @@ class QATurn:
     created_at: str
 
 
+@dataclass
+class SavedDashboard:
+    id: int
+    request: str
+    title: str
+    created_at: str
+    document: Document = field(default_factory=Document)
+    queries: list[dict[str, Any]] = field(default_factory=list)
+    analysis: str | None = None
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -87,6 +98,15 @@ class MemoryStore:
                 question TEXT NOT NULL,
                 answer_document TEXT NOT NULL,
                 queries TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS dashboards (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                request TEXT NOT NULL,
+                title TEXT NOT NULL,
+                document TEXT NOT NULL,
+                queries TEXT NOT NULL,
+                analysis TEXT,
                 created_at TEXT NOT NULL
             );
             """
@@ -277,3 +297,79 @@ class MemoryStore:
             )
             for r in rows
         ]
+
+    # --- dashboards ---
+
+    @staticmethod
+    def _derive_title(request: str) -> str:
+        title = (request or "").strip().splitlines()[0] if (request or "").strip() else ""
+        return (title[:80] or "Dashboard")
+
+    def save_dashboard(
+        self,
+        request: str,
+        document: Document,
+        queries: list[dict[str, Any]] | None = None,
+        title: str | None = None,
+    ) -> SavedDashboard:
+        created = _now()
+        queries = queries or []
+        title = title or self._derive_title(request)
+        cur = self._conn.execute(
+            "INSERT INTO dashboards (request, title, document, queries, analysis, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                request,
+                title,
+                json.dumps(document.to_dict(), default=str),
+                json.dumps(queries, default=str),
+                None,
+                created,
+            ),
+        )
+        self._conn.commit()
+        return SavedDashboard(
+            id=cur.lastrowid,
+            request=request,
+            title=title,
+            created_at=created,
+            document=document,
+            queries=queries,
+            analysis=None,
+        )
+
+    def _row_to_dashboard(self, r: sqlite3.Row) -> SavedDashboard:
+        document = Document.from_dict(json.loads(r["document"])) if r["document"] else Document()
+        queries = json.loads(r["queries"]) if r["queries"] else []
+        return SavedDashboard(
+            id=r["id"],
+            request=r["request"],
+            title=r["title"],
+            created_at=r["created_at"],
+            document=document,
+            queries=queries,
+            analysis=r["analysis"],
+        )
+
+    def get_dashboard(self, dashboard_id: int) -> SavedDashboard | None:
+        r = self._conn.execute(
+            "SELECT id, request, title, document, queries, analysis, created_at "
+            "FROM dashboards WHERE id = ?",
+            (dashboard_id,),
+        ).fetchone()
+        return self._row_to_dashboard(r) if r else None
+
+    def list_dashboards(self, limit: int = 50) -> list[SavedDashboard]:
+        rows = self._conn.execute(
+            "SELECT id, request, title, document, queries, analysis, created_at "
+            "FROM dashboards ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [self._row_to_dashboard(r) for r in rows]
+
+    def set_dashboard_analysis(self, dashboard_id: int, analysis: str) -> None:
+        self._conn.execute(
+            "UPDATE dashboards SET analysis = ? WHERE id = ?",
+            (analysis, dashboard_id),
+        )
+        self._conn.commit()
