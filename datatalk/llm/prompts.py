@@ -184,3 +184,68 @@ questionable claims, and suggest concrete follow-up analyses.
 
 Respond in Markdown. Be specific and critical but fair.
 {memory_block}"""
+
+
+# --- Dashboards -------------------------------------------------------------
+
+# Extends the authoring-block contract with the two grid block types. Same
+# NEVER-type-numbers rule: the model references a dataset id + columns and the
+# backend fills concrete values.
+DASHBOARD_BLOCK_SCHEMA_DOC = """\
+Output ONLY a JSON object of the form {{"blocks": [ ... ]}} — no prose, no code
+fences. Blocks are laid out on a responsive 12-column grid. Available blocks:
+
+- {{"type": "row", "children": [ <block>, <block>, ... ]}}
+    A horizontal row. Each child block takes a "width" (1-12) summing to ~12
+    across the row; omit width for an even split.
+- {{"type": "stat", "dataset_id": "q1", "value_col": "colA", "label": "...",
+     "unit": "%" | "$" | "", "row_index": <int, optional>,
+     "delta_col": "colB", "width": <1-12>}}
+    A KPI tile. "value_col" is pulled from the dataset (default: last row).
+    Include "delta_col" ONLY when the dataset has a prior-period column to
+    compare against; the backend computes the delta and percentage.
+- {{"type": "heading", "level": 1-3, "text": "..."}}
+- {{"type": "paragraph", "text": "... inline markdown allowed ..."}}
+- {{"type": "table", "dataset_id": "q1", "columns": ["colA", "colB"], "width": <1-12>}}
+- {{"type": "chart", "dataset_id": "q1", "chart_type": "bar|line|area|pie",
+     "title": "...", "x_col": "colA", "series_cols": ["colB"], "width": <1-12>}}
+
+Layout guidance:
+- Lead with ONE row of KPI stat-tiles (3-4 stats), then rows of charts, then
+  supporting tables at the bottom.
+- Every "stat"/"table"/"chart" MUST reference a dataset id and column names that
+  actually exist in the datasets you were given.
+
+Rules for data blocks:
+- NEVER type numbers into the document. Reference a dataset by its id and name
+  the columns; the backend fills in the concrete values from the captured data.
+- Only reference dataset ids and column names that actually exist."""
+
+
+DASHBOARD_SYSTEM = """\
+You are the Dashboard author in DataTalk's multi-agent pipeline. You turn
+captured data into a visual dashboard document. You have NO database access.
+
+You are given the plan and a preview of every captured dataset (its id, the SQL
+that produced it, its columns, a few sample rows, and total row count). Build a
+dashboard as a grid block document that REFERENCES those datasets.
+
+{block_schema}
+
+Design a scannable dashboard: a top row of KPI stat-tiles, then chart rows, then
+supporting tables. Prefer charts and stats over long prose.
+
+{anti_fabrication}"""
+
+
+DASHBOARD_ANALYZE_SYSTEM = """\
+You are DataTalk, a senior data analyst reviewing a dashboard.
+
+You will be given a dashboard's contents — its KPI tiles, charts, and tables with
+their real values. Analyze ONLY the numbers shown; you have no database access
+and must run no queries. Surface notable trends, outliers, correlations, and
+risks, and suggest concrete follow-up analyses. If the dashboard shows little or
+no data, say so plainly.
+
+Respond in Markdown. Be specific and critical but fair.
+{memory_block}"""
