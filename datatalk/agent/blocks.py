@@ -27,12 +27,14 @@ CHART_TYPES = {"bar", "line", "area", "pie"}
 class Heading:
     text: str
     level: int = 2
+    width: int | None = None
     type: str = "heading"
 
 
 @dataclass
 class Paragraph:
     text: str
+    width: int | None = None
     type: str = "paragraph"
 
 
@@ -43,6 +45,7 @@ class Table:
     columns: list[str] | None = None  # None = all columns of the dataset
     # materialized form (columns is reused; rows is populated)
     rows: list[list[Any]] | None = None
+    width: int | None = None
     type: str = "table"
 
 
@@ -57,7 +60,34 @@ class Chart:
     # materialized form
     x: dict[str, Any] | None = None  # {label, values}
     series: list[dict[str, Any]] | None = None  # [{name, values}]
+    width: int | None = None
     type: str = "chart"
+
+
+@dataclass
+class Stat:
+    # authoring form
+    label: str = ""
+    dataset_id: str | None = None
+    value_col: str | None = None
+    row_index: int | None = None  # None = last row (aggregates are single-row)
+    delta_col: str | None = None  # a prior-period value column in the same dataset
+    unit: str | None = None       # e.g. "%", "$"
+    # materialized form
+    value: Any = None
+    delta: Any = None
+    delta_pct: float | None = None
+    width: int | None = None
+    type: str = "stat"
+
+
+@dataclass
+class Row:
+    # a horizontal grid row; children carry their own width (1-12). Not a data
+    # block itself — materialize() recurses into its children.
+    children: list[Any] = field(default_factory=list)
+    width: int | None = None
+    type: str = "row"
 
 
 _BLOCK_CLASSES = {
@@ -65,19 +95,36 @@ _BLOCK_CLASSES = {
     "paragraph": Paragraph,
     "table": Table,
     "chart": Chart,
+    "stat": Stat,
+    "row": Row,
 }
 
 
 # --- (de)serialization -------------------------------------------------------
 
 def block_to_dict(block: Any) -> dict[str, Any]:
-    """Serialize a block, dropping keys whose value is ``None``."""
+    """Serialize a block, dropping keys whose value is ``None``.
+
+    A ``Row`` serializes its children recursively (so each child keeps the
+    drop-None convention); a plain ``asdict`` would keep every ``None`` field.
+    """
+    if isinstance(block, Row):
+        out: dict[str, Any] = {"type": "row"}
+        if block.width is not None:
+            out["width"] = block.width
+        out["children"] = [block_to_dict(c) for c in block.children]
+        return out
     return {k: v for k, v in asdict(block).items() if v is not None}
 
 
 def block_from_dict(data: dict[str, Any]) -> Any:
     """Reconstruct a block from a dict; unknown keys are ignored."""
     kind = data.get("type")
+    if kind == "row":
+        return Row(
+            children=[block_from_dict(c) for c in data.get("children", []) if isinstance(c, dict)],
+            width=data.get("width"),
+        )
     cls = _BLOCK_CLASSES.get(kind)
     if cls is None:
         # Unknown block type degrades to a paragraph rather than raising.
@@ -157,23 +204,81 @@ def _is_authoring_chart(b: Any) -> bool:
     return isinstance(b, Chart) and b.x is None
 
 
+def _is_authoring_stat(b: Any) -> bool:
+    return isinstance(b, Stat) and b.value is None
+
+
+def _compute_delta(value: Any, prior: Any) -> tuple[Any, float | None]:
+    """(delta, delta_pct) from current + prior; (None, None) if non-numeric."""
+    try:
+        v = float(value)
+        p = float(prior)
+    except (TypeError, ValueError):
+        return None, None
+    delta = v - p
+    delta_pct = (delta / p * 100.0) if p != 0 else None
+    return delta, delta_pct
+
+
+def _materialize_stat(block: Stat, datasets: dict[str, Any]) -> Any:
+    ds = datasets.get(block.dataset_id)
+    if ds is None:
+        return _note(f"stat unavailable: unknown dataset '{block.dataset_id}'")
+    if not block.value_col or block.value_col not in ds.columns:
+        return _note(f"stat unavailable: unknown column '{block.value_col}'")
+    if not ds.rows:
+        return _note(f"stat unavailable: dataset '{block.dataset_id}' has no rows")
+    ri = block.row_index if block.row_index is not None else len(ds.rows) - 1
+    if ri < 0 or ri >= len(ds.rows):
+        return _note(f"stat unavailable: row_index {ri} out of range")
+    value = ds.rows[ri][ds.columns.index(block.value_col)]
+    delta = delta_pct = None
+    if block.delta_col:
+        if block.delta_col not in ds.columns:
+            return _note(f"stat unavailable: unknown delta column '{block.delta_col}'")
+        prior = ds.rows[ri][ds.columns.index(block.delta_col)]
+        delta, delta_pct = _compute_delta(value, prior)
+    return Stat(
+        label=block.label, unit=block.unit, width=block.width,
+        value=value, delta=delta, delta_pct=delta_pct,
+    )
+
+
+def _clamp_width(width: int | None) -> int | None:
+    if width is None:
+        return None
+    return max(1, min(12, width))
+
+
+def _materialize_block(b: Any, datasets: dict[str, Any]) -> Any:
+    if isinstance(b, Row):
+        children = []
+        for c in b.children:
+            mat = _materialize_block(c, datasets)
+            w = _clamp_width(getattr(c, "width", None))
+            if w is not None and hasattr(mat, "width"):
+                mat.width = w
+            children.append(mat)
+        return Row(children=children, width=b.width)
+    if _is_authoring_table(b):
+        return _materialize_table(b, datasets)
+    if _is_authoring_chart(b):
+        return _materialize_chart(b, datasets)
+    if _is_authoring_stat(b):
+        return _materialize_stat(b, datasets)
+    return b
+
+
 def materialize(doc: Document, datasets: dict[str, Any]) -> Document:
-    """Resolve every authoring table/chart against ``datasets``.
+    """Resolve every authoring table/chart/stat against ``datasets``.
 
     ``datasets`` maps ``dataset_id`` -> an object exposing ``.columns`` and
     ``.rows`` (e.g. an :class:`~datatalk.agent.executor.QueryResult`). A missing
-    dataset id or unknown column degrades that block to a paragraph note rather
-    than raising, so one bad reference never aborts a whole report.
+    dataset id, unknown column, or out-of-range row degrades that block to a
+    paragraph note rather than raising, so one bad reference never aborts a
+    whole dashboard. ``Row`` blocks recurse into their children.
     """
-    out: list[Any] = []
-    for b in doc.blocks:
-        if _is_authoring_table(b):
-            out.append(_materialize_table(b, datasets))
-        elif _is_authoring_chart(b):
-            out.append(_materialize_chart(b, datasets))
-        else:
-            out.append(b)
-    return Document(blocks=out)
+    return Document(blocks=[_materialize_block(b, datasets) for b in doc.blocks])
 
 
 # --- flattening --------------------------------------------------------------
@@ -184,37 +289,51 @@ def _fmt(value: Any) -> str:
     return str(value)
 
 
+def _flatten_block(b: Any, parts: list[str]) -> None:
+    if isinstance(b, Row):
+        for c in b.children:
+            _flatten_block(c, parts)
+        return
+    if isinstance(b, Heading):
+        level = max(1, min(6, b.level))
+        parts.append(f"{'#' * level} {b.text}")
+    elif isinstance(b, Stat):
+        line = f"{b.label}: {_fmt(b.value)}{b.unit or ''}"
+        if b.delta is not None:
+            line += f" (Δ {_fmt(b.delta)})"
+        parts.append(line)
+    elif isinstance(b, Paragraph):
+        parts.append(b.text)
+    elif isinstance(b, Table):
+        if b.columns:
+            parts.append(" | ".join(_fmt(c) for c in b.columns))
+            parts.append(" | ".join("---" for _ in b.columns))
+            for row in b.rows or []:
+                parts.append(" | ".join(_fmt(v) for v in row))
+    elif isinstance(b, Chart):
+        parts.append(f"{b.title or 'Chart'} ({b.chart_type})")
+        if b.x and b.series:
+            labels = b.x.get("values", [])
+            for s in b.series:
+                pairs = ", ".join(
+                    f"{_fmt(x)}={_fmt(v)}"
+                    for x, v in zip(labels, s.get("values", []))
+                )
+                parts.append(f"{s.get('name', '')}: {pairs}")
+    parts.append("")  # blank separator line
+
+
 def document_to_text(doc: Document) -> str:
     """Flatten a materialized Document to plain text.
 
-    Used by the Analyze agent and for memory embedding, which both expect a
+    Used by the Analyze agents and for memory embedding, which both expect a
     single narrative string. Tables become pipe rows; charts become a titled
-    value summary.
+    value summary; stats become ``label: value (Δ delta)``; a row flattens by
+    flattening its children.
     """
     parts: list[str] = []
     for b in doc.blocks:
-        if isinstance(b, Heading):
-            level = max(1, min(6, b.level))
-            parts.append(f"{'#' * level} {b.text}")
-        elif isinstance(b, Paragraph):
-            parts.append(b.text)
-        elif isinstance(b, Table):
-            if b.columns:
-                parts.append(" | ".join(_fmt(c) for c in b.columns))
-                parts.append(" | ".join("---" for _ in b.columns))
-                for row in b.rows or []:
-                    parts.append(" | ".join(_fmt(v) for v in row))
-        elif isinstance(b, Chart):
-            parts.append(f"{b.title or 'Chart'} ({b.chart_type})")
-            if b.x and b.series:
-                labels = b.x.get("values", [])
-                for s in b.series:
-                    pairs = ", ".join(
-                        f"{_fmt(x)}={_fmt(v)}"
-                        for x, v in zip(labels, s.get("values", []))
-                    )
-                    parts.append(f"{s.get('name', '')}: {pairs}")
-        parts.append("")  # blank separator line
+        _flatten_block(b, parts)
     return "\n".join(parts).strip()
 
 

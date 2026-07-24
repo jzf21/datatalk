@@ -5,6 +5,8 @@ from datatalk.agent.blocks import (
     Document,
     Heading,
     Paragraph,
+    Row,
+    Stat,
     Table,
     document_to_text,
     materialize,
@@ -143,3 +145,96 @@ def test_parse_json_object_handles_code_fences():
     assert parse_json_object('```json\n{"a": 1}\n```') == {"a": 1}
     assert parse_json_object('prefix {"b": 2} suffix') == {"b": 2}
     assert parse_json_object("not json") == {}
+
+
+def _delta_dataset():
+    from datatalk.agent.executor import QueryResult
+    return QueryResult(
+        columns=["metric", "current", "prior"],
+        rows=[["revenue", 120, 100]],
+        row_count=1,
+        truncated=False,
+        sql="SELECT ...",
+    )
+
+
+def test_materialize_stat_value_and_delta():
+    doc = Document(
+        blocks=[
+            Stat(dataset_id="q1", value_col="current", label="Revenue",
+                 delta_col="prior", unit="$"),
+        ]
+    )
+    out = materialize(doc, {"q1": _delta_dataset()})
+    stat = out.blocks[0]
+    assert isinstance(stat, Stat)
+    assert stat.value == 120
+    assert stat.delta == 20.0
+    assert stat.delta_pct == 20.0
+    assert stat.label == "Revenue"
+    assert stat.unit == "$"
+
+
+def test_materialize_stat_defaults_to_last_row():
+    from datatalk.agent.executor import QueryResult
+    ds = QueryResult(columns=["m", "v"], rows=[["jan", 1], ["feb", 9]],
+                     row_count=2, truncated=False, sql="x")
+    out = materialize(Document(blocks=[Stat(dataset_id="q1", value_col="v", label="V")]),
+                      {"q1": ds})
+    assert out.blocks[0].value == 9  # last row by default
+
+
+def test_materialize_stat_bad_reference_degrades():
+    out = materialize(Document(blocks=[Stat(dataset_id="q1", value_col="nope", label="X")]),
+                      {"q1": _delta_dataset()})
+    assert isinstance(out.blocks[0], Paragraph)
+    assert "unavailable" in out.blocks[0].text
+
+    out2 = materialize(Document(blocks=[Stat(dataset_id="nope", value_col="v", label="X")]),
+                       {"q1": _delta_dataset()})
+    assert isinstance(out2.blocks[0], Paragraph)
+
+
+def test_materialize_row_children_and_one_bad_child_still_renders():
+    doc = Document(
+        blocks=[
+            Row(children=[
+                Stat(dataset_id="q1", value_col="current", label="Revenue", width=6),
+                Stat(dataset_id="q1", value_col="nope", label="Broken", width=6),
+                Table(dataset_id="q1", columns=["metric", "current"], width=99),
+            ])
+        ]
+    )
+    out = materialize(doc, {"q1": _delta_dataset()})
+    row = out.blocks[0]
+    assert isinstance(row, Row)
+    assert isinstance(row.children[0], Stat) and row.children[0].value == 120
+    assert row.children[0].width == 6                    # width preserved
+    assert isinstance(row.children[1], Paragraph)        # bad child -> note
+    assert isinstance(row.children[2], Table)            # good child still renders
+    assert row.children[2].width == 12                   # clamped 99 -> 12
+
+
+def test_row_round_trips_through_dict():
+    doc = Document(blocks=[Row(children=[
+        Stat(dataset_id="q1", value_col="current", label="Rev", width=4),
+        Heading(text="Hi", level=2, width=8),
+    ])])
+    restored = Document.from_dict(doc.to_dict())
+    assert restored.to_dict() == doc.to_dict()
+    assert isinstance(restored.blocks[0], Row)
+    assert isinstance(restored.blocks[0].children[0], Stat)
+    assert restored.blocks[0].children[0].width == 4
+
+
+def test_document_to_text_flattens_stat_and_row():
+    doc = materialize(
+        Document(blocks=[Row(children=[
+            Stat(dataset_id="q1", value_col="current", label="Revenue",
+                 delta_col="prior", unit="$"),
+        ])]),
+        {"q1": _delta_dataset()},
+    )
+    text = document_to_text(doc)
+    assert "Revenue: 120" in text
+    assert "Δ 20.0" in text
