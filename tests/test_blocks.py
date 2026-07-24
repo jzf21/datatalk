@@ -238,3 +238,25 @@ def test_document_to_text_flattens_stat_and_row():
     text = document_to_text(doc)
     assert "Revenue: 120" in text
     assert "Δ 20.0" in text
+
+
+def test_materialize_does_not_mutate_original_document():
+    original_child = Heading(text="Hi", level=2, width=99)
+    doc = Document(blocks=[Row(children=[original_child])])
+    out = materialize(doc, {"q1": _dataset()})
+
+    # The original child object must be untouched (materialize() is pure).
+    assert original_child.width == 99
+    # The returned document's corresponding child has the clamped width.
+    assert out.blocks[0].children[0].width == 12
+
+
+def test_materialize_clamps_top_level_stat_width():
+    ds = _delta_dataset()
+    out = materialize(
+        Document(blocks=[Stat(dataset_id="q1", value_col="current", label="V", width=99)]),
+        {"q1": ds},
+    )
+    stat = out.blocks[0]
+    assert isinstance(stat, Stat)
+    assert stat.width == 12

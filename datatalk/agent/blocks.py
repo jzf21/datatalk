@@ -6,16 +6,18 @@ agent emit *authoring* blocks that reference a dataset plus column mappings;
 :func:`materialize` resolves those references into concrete values before the
 Document is stored or sent to the UI.
 
-A :class:`Document` is an ordered list of typed blocks. Two block families carry
-data — ``table`` and ``chart`` — and each has an *authoring* form (references a
-dataset by id) and a *materialized* form (holds concrete values). A malformed
-reference degrades gracefully to a paragraph note; it never raises.
+A :class:`Document` is an ordered list of typed blocks. Three block families
+carry data — ``table``, ``chart``, and ``stat`` — and each has an *authoring*
+form (references a dataset by id) and a *materialized* form (holds concrete
+values). ``row`` is a layout container (not itself data-carrying);
+:func:`materialize` recurses into its children. A malformed reference degrades
+gracefully to a paragraph note; it never raises.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
 CHART_TYPES = {"bar", "line", "area", "pie"}
@@ -239,7 +241,7 @@ def _materialize_stat(block: Stat, datasets: dict[str, Any]) -> Any:
         prior = ds.rows[ri][ds.columns.index(block.delta_col)]
         delta, delta_pct = _compute_delta(value, prior)
     return Stat(
-        label=block.label, unit=block.unit, width=block.width,
+        label=block.label, unit=block.unit, width=_clamp_width(block.width),
         value=value, delta=delta, delta_pct=delta_pct,
     )
 
@@ -257,7 +259,7 @@ def _materialize_block(b: Any, datasets: dict[str, Any]) -> Any:
             mat = _materialize_block(c, datasets)
             w = _clamp_width(getattr(c, "width", None))
             if w is not None and hasattr(mat, "width"):
-                mat.width = w
+                mat = replace(mat, width=w)
             children.append(mat)
         return Row(children=children, width=b.width)
     if _is_authoring_table(b):
