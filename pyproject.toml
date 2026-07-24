@@ -1,0 +1,31 @@
+[project]
+name = "datatalk"
+version = "0.1.0"
+description = "Schema-agnostic LLM report generation and analysis over ClickHouse Jira data"
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=1.40",
+    "clickhouse-connect>=0.7",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "numpy>=1.26",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+datatalk-check = "datatalk.scripts.check_connection:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["datatalk*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
