@@ -61,6 +61,16 @@
     border: 1px solid var(--border); border-radius: 8px; }
   .doc .chart-title { font-size: 13px; color: var(--muted); margin-bottom: 6px; }
   .doc .note { color: var(--muted); font-style: italic; }
+  /* dashboard grid */
+  .doc .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 12px; margin: 12px 0; }
+  .doc .grid > * { min-width: 0; grid-column: span 12; }
+  @media (min-width: 640px) { .doc .grid > .cell { grid-column: span var(--w, 6); } }
+  .doc .stat { background: var(--panel2); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px 16px; }
+  .doc .stat .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
+  .doc .stat .value { font-size: 28px; font-weight: 700; margin-top: 4px; }
+  .doc .stat .delta { font-size: 13px; margin-top: 4px; }
+  .doc .stat .delta.up { color: var(--ok); } .doc .stat .delta.down { color: var(--bad); }
   .sug { display: flex; justify-content: space-between; gap: 10px; padding: 10px 0;
     border-bottom: 1px solid var(--border); }
   .sug button { background: none; border: 1px solid var(--border); color: var(--muted);
@@ -83,6 +93,7 @@
 </header>
 <nav>
   <button data-tab="report" class="active">Report</button>
+  <button data-tab="dashboard">Dashboard</button>
   <button data-tab="analyze">Analyze</button>
   <button data-tab="memory">Memory</button>
 </nav>
@@ -111,6 +122,26 @@
         <button class="primary" id="askBtn">Ask</button>
       </div>
     </div>
+  </section>
+
+  <!-- DASHBOARD -->
+  <section id="tab-dashboard" style="display:none">
+    <textarea id="dashReq" placeholder="Describe a dashboard, e.g. 'KPI dashboard of ticket volume, resolution time, and SLA breach rate by month.'"></textarea>
+    <label class="check"><input type="checkbox" id="dashUseMem" checked /> use learned suggestions</label>
+    <div class="row">
+      <button class="primary" id="dashGo">Generate dashboard</button>
+      <select id="openDashboard" style="margin-top:8px">
+        <option value="">— open a saved dashboard —</option>
+      </select>
+    </div>
+    <div class="card" id="dashProgress" style="display:none">
+      <div class="log" id="dashLog"></div>
+    </div>
+    <div class="card doc" id="dashboard" style="display:none"></div>
+    <div id="dashAnalyzeRow" style="display:none; margin-top:12px">
+      <button class="primary" id="dashAnalyzeBtn">Analyze</button>
+    </div>
+    <div class="card md" id="dashAnalysis" style="display:none"></div>
   </section>
 
   <!-- ANALYZE -->
@@ -146,11 +177,12 @@ const CHART_COLORS = ['#6ea8fe','#4ade80','#f87171','#fbbf24','#a78bfa','#38bdf8
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   document.querySelectorAll('nav button').forEach(x => x.classList.remove('active'));
   b.classList.add('active');
-  ['report','analyze','memory'].forEach(t =>
+  ['report','dashboard','analyze','memory'].forEach(t =>
     $('#tab-'+t).style.display = (t === b.dataset.tab) ? '' : 'none');
   if (b.dataset.tab === 'memory') loadSuggestions();
   if (b.dataset.tab === 'analyze') loadReports();
   if (b.dataset.tab === 'report') loadReportPicker();
+  if (b.dataset.tab === 'dashboard') loadDashboardPicker();
 });
 
 // --- inline markdown (bold, italic, code) ---
@@ -213,7 +245,44 @@ function renderBlock(b) {
   }
   if (b.type === 'table') return renderTable(b);
   if (b.type === 'chart') return renderChart(b);
+  if (b.type === 'row') return renderRowBlock(b);
+  if (b.type === 'stat') return renderStat(b);
   const el = document.createElement('p'); el.textContent = ''; return el;
+}
+
+function renderRowBlock(b) {
+  const grid = document.createElement('div'); grid.className = 'grid';
+  const children = b.children || [];
+  const even = Math.max(1, Math.round(12 / children.length));
+  for (const c of children) {
+    const cell = document.createElement('div'); cell.className = 'cell';
+    let w = c.width == null ? even : c.width;
+    w = Math.max(1, Math.min(12, w));
+    cell.style.setProperty('--w', w);
+    cell.appendChild(renderBlock(c));
+    grid.appendChild(cell);
+  }
+  return grid;
+}
+
+function renderStat(b) {
+  const el = document.createElement('div'); el.className = 'stat';
+  const label = document.createElement('div'); label.className = 'label';
+  label.textContent = b.label || '';
+  const value = document.createElement('div'); value.className = 'value';
+  const unit = b.unit || '';
+  const v = b.value == null ? '—' : b.value;
+  value.textContent = (unit === '$' ? unit + v : String(v) + unit);
+  el.append(label, value);
+  if (b.delta != null) {
+    const d = document.createElement('div');
+    const up = Number(b.delta) >= 0;
+    d.className = 'delta ' + (up ? 'up' : 'down');
+    const pct = b.delta_pct == null ? '' : ` (${up ? '+' : ''}${Number(b.delta_pct).toFixed(1)}%)`;
+    d.textContent = `${up ? '▲' : '▼'} ${b.delta}${pct}`;
+    el.appendChild(d);
+  }
+  return el;
 }
 
 function renderTable(b) {
@@ -435,6 +504,73 @@ $('#addSug').onclick = async () => {
   await api('/api/feedback', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ text }) });
   $('#sugText').value = ''; $('#addSug').disabled = false; loadSuggestions();
 };
+
+// --- dashboards ---
+let currentDashboardId = null;
+
+$('#dashGo').onclick = async () => {
+  const request = $('#dashReq').value.trim();
+  if (!request) return;
+  $('#dashGo').disabled = true;
+  currentDashboardId = null;
+  $('#dashProgress').style.display = ''; $('#dashLog').innerHTML = '';
+  $('#dashboard').style.display = 'none'; destroyCharts(); $('#dashboard').innerHTML = '';
+  $('#dashAnalyzeRow').style.display = 'none';
+  $('#dashAnalysis').style.display = 'none'; $('#dashAnalysis').innerHTML = '';
+  const log = m => { $('#dashLog').innerHTML += m + '<br>'; $('#dashLog').scrollTop = 1e9; };
+  try {
+    await streamNDJSON('/api/dashboard', { request, use_memory: $('#dashUseMem').checked }, ev => {
+      const d = ev.data || {};
+      if (ev.kind === 'status') log('· ' + d.message);
+      else if (ev.kind === 'memory') log('· using ' + d.count + ' learned suggestion(s)');
+      else if (ev.kind === 'plan') log('· plan: ' + (d.sections||[]).map(s => s.title).join(' › '));
+      else if (ev.kind === 'sql') log('<span class="sql">SQL » ' + esc(d.sql) + '</span>');
+      else if (ev.kind === 'result') log('  ↳ ' + d.row_count + ' row(s) → ' + d.dataset_id);
+      else if (ev.kind === 'error') log('<span class="err">! ' + esc(d.message) + '</span>');
+      else if (ev.kind === 'dashboard') {
+        $('#dashboard').style.display = ''; destroyCharts(); renderDocument($('#dashboard'), d.document);
+      } else if (ev.kind === 'saved') {
+        log('· saved as dashboard #' + d.dashboard_id);
+        currentDashboardId = d.dashboard_id;
+        $('#dashAnalyzeRow').style.display = '';
+        loadDashboardPicker();
+      }
+    });
+  } catch (e) { log('<span class="err">'+e+'</span>'); }
+  finally { $('#dashGo').disabled = false; }
+};
+
+$('#dashAnalyzeBtn').onclick = async () => {
+  if (!currentDashboardId) return;
+  $('#dashAnalyzeBtn').disabled = true;
+  $('#dashAnalysis').style.display = ''; $('#dashAnalysis').innerHTML = '<span class="muted">Analyzing…</span>';
+  try {
+    const r = await api('/api/dashboards/' + currentDashboardId + '/analyze',
+      { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ focus: null }) });
+    $('#dashAnalysis').innerHTML = r.analysis ? md(r.analysis) : ('<span class="err">'+(r.detail||'error')+'</span>');
+  } catch(e){ $('#dashAnalysis').innerHTML = '<span class="err">'+e+'</span>'; }
+  finally { $('#dashAnalyzeBtn').disabled = false; }
+};
+
+async function loadDashboardPicker() {
+  const { dashboards } = await api('/api/dashboards');
+  const sel = $('#openDashboard');
+  sel.innerHTML = '<option value="">— open a saved dashboard —</option>' +
+    dashboards.map(d => `<option value="${d.id}">#${d.id}: ${esc((d.title||d.request).slice(0,60))}</option>`).join('');
+}
+$('#openDashboard').onchange = async () => {
+  const id = $('#openDashboard').value;
+  if (!id) return;
+  const d = await api('/api/dashboards/' + id);
+  currentDashboardId = d.id;
+  $('#dashReq').value = d.request;
+  $('#dashProgress').style.display = 'none';
+  $('#dashboard').style.display = ''; destroyCharts(); renderDocument($('#dashboard'), d.document);
+  $('#dashAnalyzeRow').style.display = '';
+  $('#dashAnalysis').style.display = d.analysis ? '' : 'none';
+  $('#dashAnalysis').innerHTML = d.analysis ? md(d.analysis) : '';
+};
+loadDashboardPicker();
 </script>
 </body>
 </html>
