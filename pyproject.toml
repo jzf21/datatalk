@@ -12,13 +12,22 @@ dependencies = [
     "uvicorn[standard]>=0.29",
     "numpy>=1.26",
     "python-dotenv>=1.0",
+    "sqlalchemy>=2.0",
+    "alembic>=1.13",
+    "psycopg[binary]>=3.1",
+    "argon2-cffi>=23.1",
+    "cryptography>=42",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+# httpx is required by fastapi.testclient.TestClient; it was previously pulled
+# in transitively and never declared.
+dev = ["pytest>=8.0", "httpx>=0.27"]
 
 [project.scripts]
 datatalk-check = "datatalk.scripts.check_connection:main"
+datatalk-db = "datatalk.scripts.db:main"
+datatalk-import-sqlite = "datatalk.scripts.import_sqlite:main"
 
 [build-system]
 requires = ["setuptools>=68"]

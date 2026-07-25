@@ -69,7 +69,44 @@ class Settings(BaseSettings):
         ]
 
     # Storage
+    # Postgres holds orgs, users, sessions and all per-org memory. Required at
+    # runtime; empty fails fast in the app lifespan rather than at first request.
+    database_url: str = Field(default="", alias="DATABASE_URL")
+    db_pool_size: int = Field(default=10, alias="DATATALK_DB_POOL_SIZE")
+    db_max_overflow: int = Field(default=20, alias="DATATALK_DB_MAX_OVERFLOW")
+    db_echo: bool = Field(default=False, alias="DATATALK_DB_ECHO")
+    # Auto-run `alembic upgrade head` on startup. Safe only single-process:
+    # two workers racing `upgrade head` can corrupt alembic_version.
+    db_auto_migrate: bool = Field(default=False, alias="DATATALK_DB_AUTO_MIGRATE")
+    # Legacy SQLite path -- read only by `datatalk-import-sqlite`.
     datatalk_db_path: str = Field(default="datatalk.sqlite3", alias="DATATALK_DB_PATH")
+
+    # Secrets
+    # urlsafe-base64 Fernet key(s) encrypting per-org ClickHouse passwords.
+    # Comma-separated for rotation: the first encrypts, all decrypt.
+    datatalk_secret_key: str = Field(default="", alias="DATATALK_SECRET_KEY")
+
+    # Auth / sessions
+    cookie_name: str = Field(default="dt_session", alias="DATATALK_COOKIE_NAME")
+    # Marks the session cookie Secure. MUST stay false on plain-HTTP dev or the
+    # browser silently drops the cookie and every login 200s then 401s.
+    cookie_secure: bool = Field(default=False, alias="DATATALK_COOKIE_SECURE")
+    session_ttl_days: int = Field(default=14, alias="DATATALK_SESSION_TTL_DAYS")
+    # Anyone may sign up and create an org. Fine for local development; with it
+    # on, a stranger gets an org and spends this deployment's OpenAI key.
+    allow_open_signup: bool = Field(default=True, alias="DATATALK_ALLOW_OPEN_SIGNUP")
+
+    # Bootstrap (idempotent, applied on startup when set)
+    bootstrap_org_name: str = Field(default="", alias="DATATALK_BOOTSTRAP_ORG_NAME")
+    bootstrap_admin_email: str = Field(default="", alias="DATATALK_BOOTSTRAP_ADMIN_EMAIL")
+    bootstrap_admin_password: str = Field(
+        default="", alias="DATATALK_BOOTSTRAP_ADMIN_PASSWORD"
+    )
+
+    # Memory retrieval
+    # Upper bound on suggestion rows scored in Python per retrieval. An OOM
+    # guard a single org cannot defeat by adding suggestions.
+    memory_max_candidates: int = Field(default=5000, alias="DATATALK_MEMORY_MAX_CANDIDATES")
 
     # Web / CORS
     # Comma-separated browser origins allowed to call the API (the Next.js

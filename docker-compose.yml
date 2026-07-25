@@ -1,0 +1,29 @@
+# Local Postgres for DataTalk (application storage: orgs, users, memory, reports).
+#
+#   docker compose up -d
+#   datatalk-db upgrade
+#
+# Port 5433 on the host, not 5432, so this never collides with an existing
+# local Postgres. Two databases are created: `datatalk` for development and
+# `datatalk_test` for the test suite -- tests refuse to run against the dev URL.
+services:
+  postgres:
+    image: postgres:16
+    container_name: datatalk-postgres
+    environment:
+      POSTGRES_USER: datatalk
+      POSTGRES_PASSWORD: datatalk
+      POSTGRES_DB: datatalk
+    ports:
+      - "5433:5432"
+    volumes:
+      - datatalk-pgdata:/var/lib/postgresql/data
+      - ./scripts/init-test-db.sql:/docker-entrypoint-initdb.d/10-test-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U datatalk -d datatalk"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  datatalk-pgdata:
