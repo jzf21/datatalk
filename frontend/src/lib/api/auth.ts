@@ -1,4 +1,4 @@
-import { ApiError, apiGet, apiPost, apiPut } from "./client";
+import { ApiError, apiErrorMessage, apiGet, apiPost, apiPut } from "./client";
 
 export interface AuthUser {
   id: string;
@@ -104,28 +104,13 @@ export function isUnauthorized(err: unknown): boolean {
 }
 
 /**
- * Login/signup failures come back as machine-readable `detail` slugs. They are
- * translated here rather than shown raw, and deliberately stay vague about
- * whether an account exists.
+ * Login/signup failures come back as machine-readable `detail` slugs.
+ *
+ * The wording lives in `client.ts` alongside every other code the API returns,
+ * so a run that dies mid-stream and a failed sign-in say the same thing about
+ * the same slug. Deliberately stays vague about whether an account exists.
  */
-export function authErrorMessage(detail: string): string {
-  switch (detail) {
-    case "invalid_credentials":
-      return "That email and password don't match.";
-    case "too_many_attempts":
-      return "Too many failed attempts. Try again in 15 minutes.";
-    case "email_taken":
-      return "An account with that email already exists.";
-    case "signup_disabled":
-      return "Signup is disabled on this server.";
-    case "not_authenticated":
-      return "Your session has expired. Please sign in again.";
-    case "no_connection":
-      return "This workspace isn’t connected to a warehouse yet.";
-    default:
-      return detail;
-  }
-}
+export const authErrorMessage = apiErrorMessage;
 
 /**
  * The backend answers 409 `no_connection` (not a 502) when an org has no

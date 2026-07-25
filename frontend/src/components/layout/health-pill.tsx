@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 
+import { ApiError } from "@/lib/api/client";
 import { useHealth } from "@/lib/api/queries";
 import {
   HoverCard,
@@ -25,20 +26,27 @@ function Dot({ state }: { state: "ok" | "bad" | "unknown" }) {
 }
 
 export function HealthPill() {
-  const { data, isPending, isError } = useHealth();
+  const { data, isPending, isError, error } = useHealth();
+
+  // /api/health needs a warehouse, so it 409s for an unconfigured workspace.
+  // That is a setup step, not an outage -- calling it "API unreachable" would
+  // send someone to check uvicorn for no reason.
+  const unconfigured = error instanceof ApiError && error.status === 409;
 
   const ch = isPending || isError ? "unknown" : data.clickhouse.ok ? "ok" : "bad";
   const oa = isPending || isError ? "unknown" : data.openai.ok ? "ok" : "bad";
 
   // Status is never colour alone -- the dots are decorative and the label
   // carries the meaning.
-  const label = isError
-    ? "API unreachable"
-    : isPending
-      ? "Checking…"
-      : ch === "ok" && oa === "ok"
-        ? "Connected"
-        : "Degraded";
+  const label = unconfigured
+    ? "Not connected"
+    : isError
+      ? "API unreachable"
+      : isPending
+        ? "Checking…"
+        : ch === "ok" && oa === "ok"
+          ? "Connected"
+          : "Degraded";
 
   return (
     <HoverCard openDelay={150}>
@@ -60,7 +68,9 @@ export function HealthPill() {
           <div>
             <dt className="label-caps text-ink-secondary">ClickHouse</dt>
             <dd className="cite text-ink-primary">
-              {isError
+              {unconfigured
+                ? "No connection configured"
+                : isError
                 ? "API unreachable"
                 : isPending
                   ? "…"
@@ -72,7 +82,9 @@ export function HealthPill() {
           <div>
             <dt className="label-caps text-ink-secondary">OpenAI</dt>
             <dd className="cite text-ink-primary">
-              {isError
+              {unconfigured
+                ? "No connection configured"
+                : isError
                 ? "API unreachable"
                 : isPending
                   ? "…"

@@ -1,4 +1,4 @@
-import { API_BASE, ApiError } from "./client";
+import { API_BASE, ApiError, announceApiError } from "./client";
 import type { RunEvent } from "./types";
 
 /**
@@ -86,7 +86,11 @@ export async function* streamNdjson(
     } catch {
       /* not JSON */
     }
-    throw new ApiError(res.status, detail);
+    const error = new ApiError(res.status, detail);
+    // Same contract as the plain client: a run that dies on an expired session
+    // or a missing connection must move the whole app, not just this one run.
+    announceApiError(error);
+    throw error;
   }
   if (!res.body) throw new ApiError(res.status, "Response carried no body.");
 
