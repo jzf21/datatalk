@@ -1,19 +1,17 @@
-"""Dashboard web endpoints (TestClient, monkeypatched agents, temp DB)."""
+"""Dashboard web endpoints (TestClient, monkeypatched agents, real Postgres).
+
+The endpoints are authenticated now, so these go through a signed-up client
+rather than monkeypatching a store factory.
+"""
 
 import json
 
-import numpy as np
-from fastapi.testclient import TestClient
+import pytest
 
-import datatalk.memory.store as store_mod
 import datatalk.web.app as web
 from datatalk.agent.blocks import Document, Row, Stat, materialize
 from datatalk.agent.dashboard import DashboardResult
 from datatalk.agent.executor import QueryResult
-
-
-def _fake_embed(texts, ctx=None):
-    return [np.array([0.01], dtype=np.float32).tolist() for _ in texts]
 
 
 def _doc():
@@ -25,15 +23,13 @@ def _doc():
     )
 
 
-def _client(tmp_path, monkeypatch):
-    monkeypatch.setattr(store_mod, "embed", _fake_embed)
-    db = str(tmp_path / "mem.sqlite3")
-    monkeypatch.setattr(web, "_store", lambda: store_mod.MemoryStore(path=db))
-    return TestClient(web.app)
+@pytest.fixture
+def client(auth_client):
+    """Authenticated client; the dashboard endpoints all require a session."""
+    return auth_client
 
 
-def test_dashboard_generate_saves_and_lists(tmp_path, monkeypatch):
-    client = _client(tmp_path, monkeypatch)
+def test_dashboard_generate_saves_and_lists(client, monkeypatch):
     doc = _doc()
 
     def fake_generate(request, **kwargs):
@@ -61,23 +57,33 @@ def test_dashboard_generate_saves_and_lists(tmp_path, monkeypatch):
     assert full["analysis"] is None
 
 
-def test_dashboard_generate_empty_request_400(tmp_path, monkeypatch):
-    client = _client(tmp_path, monkeypatch)
+def test_dashboard_generate_empty_request_400(client, monkeypatch):
     assert client.post("/api/dashboard", json={"request": "  "}).status_code == 400
 
 
-def test_dashboard_analyze_persists(tmp_path, monkeypatch):
-    client = _client(tmp_path, monkeypatch)
-    saved = store_mod.MemoryStore(path=web._store().path).save_dashboard("d", _doc(), [])
+def test_dashboard_analyze_persists(client, monkeypatch):
+    doc = _doc()
+    monkeypatch.setattr(
+        web,
+        "generate_dashboard",
+        lambda request, **kw: DashboardResult(
+            request=request, document=doc, queries=[], steps=1
+        ),
+    )
+    with client.stream("POST", "/api/dashboard", json={"request": "d"}) as resp:
+        saved_id = next(
+            json.loads(ln)["data"]["dashboard_id"]
+            for ln in resp.iter_lines()
+            if ln and json.loads(ln)["kind"] == "saved"
+        )
 
     monkeypatch.setattr(web, "analyze_dashboard", lambda document, **kw: "## Up")
-    r = client.post(f"/api/dashboards/{saved.id}/analyze", json={"focus": None})
+    r = client.post(f"/api/dashboards/{saved_id}/analyze", json={"focus": None})
     assert r.status_code == 200 and r.json()["analysis"] == "## Up"
     # persisted
-    assert client.get(f"/api/dashboards/{saved.id}").json()["analysis"] == "## Up"
+    assert client.get(f"/api/dashboards/{saved_id}").json()["analysis"] == "## Up"
 
 
-def test_dashboard_analyze_missing_404(tmp_path, monkeypatch):
-    client = _client(tmp_path, monkeypatch)
+def test_dashboard_analyze_missing_404(client, monkeypatch):
     monkeypatch.setattr(web, "analyze_dashboard", lambda document, **kw: "x")
     assert client.post("/api/dashboards/9999/analyze", json={}).status_code == 404

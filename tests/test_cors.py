@@ -35,12 +35,25 @@ def test_preflight_from_unknown_origin_is_not_allowed():
 
 
 def test_error_responses_still_carry_cors_headers():
-    # The frontend must be able to read {"detail": ...} off a pre-stream 400.
+    # The frontend must be able to read {"detail": ...} off an error response.
+    # /api/report is authenticated now, so an unauthenticated call is the
+    # simplest error to provoke -- and the 401 the frontend must read to know
+    # it should show the login screen.
     resp = TestClient(web.app).post(
         "/api/report", json={"request": "  "}, headers={"Origin": ALLOWED}
     )
-    assert resp.status_code == 400
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "not_authenticated"
     assert resp.headers["access-control-allow-origin"] == ALLOWED
+
+
+def test_credentials_are_allowed_so_cookies_reach_a_cross_origin_frontend():
+    """Cookie auth cannot work cross-origin without this. Safe only because
+    allow_origins is an exact allowlist, never a wildcard."""
+    resp = TestClient(web.app).options("/api/report", headers=_PREFLIGHT)
+    assert resp.headers.get("access-control-allow-credentials") == "true"
+    assert resp.headers["access-control-allow-origin"] == ALLOWED
+    assert resp.headers["access-control-allow-origin"] != "*"
 
 
 def test_empty_origin_setting_disables_cors(monkeypatch):

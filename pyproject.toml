@@ -7,6 +7,7 @@ dependencies = [
     "openai>=1.40",
     "clickhouse-connect>=0.7",
     "pydantic>=2.6",
+    "pydantic[email]>=2.6",  # EmailStr validation on signup/login
     "pydantic-settings>=2.2",
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",

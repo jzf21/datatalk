@@ -223,8 +223,13 @@ def _bind_session_scope(request, monkeypatch):
         session.flush()  # surface constraint violations; the outer txn rolls back
 
     import datatalk.db.session as session_mod
+    import datatalk.web.app as web_mod
 
     monkeypatch.setattr(session_mod, "session_scope", _scope)
+    # web/app.py binds the name at import time (`from ... import session_scope`),
+    # so patching only the source module would leave the streaming endpoints
+    # using a real pooled session -- one that cannot see this transaction's org.
+    monkeypatch.setattr(web_mod, "session_scope", _scope)
 
 
 # --- tenants ------------------------------------------------------------------
@@ -290,3 +295,42 @@ def store(db, org_a, user_a):
 def other_store(db, org_b, user_b):
     """A second org's store -- the counterparty in every isolation test."""
     return store_for(db, org_b, user_b)
+
+
+# --- authenticated HTTP client ------------------------------------------------
+
+TEST_PASSWORD = "correct-horse-battery"
+
+
+@pytest.fixture
+def api_client(db):
+    """TestClient sharing the test's rolled-back transaction."""
+    from fastapi.testclient import TestClient
+
+    from datatalk.auth import passwords
+    from datatalk.web import app as web
+    from datatalk.web.deps import get_db
+
+    # argon2 at production parameters is ~80ms per login; a suite with dozens
+    # of them would crawl.
+    passwords.use_fast_params_for_tests()
+
+    web.app.dependency_overrides[get_db] = lambda: db
+    with TestClient(web.app) as client:
+        yield client
+    web.app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def auth_client(api_client):
+    """A client that has signed up, so it carries a live session cookie."""
+    resp = api_client.post(
+        "/api/auth/signup",
+        json={
+            "email": f"user-{uuid4().hex[:8]}@example.com",
+            "password": TEST_PASSWORD,
+            "org_name": "Test Org",
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    return api_client
