@@ -77,6 +77,43 @@ def test_materialize_table_and_chart():
     ]
 
 
+def test_materialize_preserves_dataset_id_for_citation():
+    """The UI cites the query behind every number, so the id must survive."""
+    doc = Document(
+        blocks=[
+            Table(dataset_id="q1", columns=["month"]),
+            Chart(chart_type="bar", title="T", dataset_id="q1",
+                  x_col="month", series_cols=["issues"]),
+            Stat(dataset_id="q1", label="Issues", value_col="issues"),
+        ]
+    )
+    out = materialize(doc, {"q1": _dataset()})
+
+    assert [b.dataset_id for b in out.blocks] == ["q1", "q1", "q1"]
+    assert all(b["dataset_id"] == "q1" for b in out.to_dict()["blocks"])
+
+
+def test_materialized_blocks_are_not_re_materialized():
+    """dataset_id is not the authoring discriminator -- rows/x/value are."""
+    doc = Document(
+        blocks=[
+            Table(dataset_id="q1"),
+            Chart(chart_type="bar", title="T", dataset_id="q1",
+                  x_col="month", series_cols=["issues"]),
+            Stat(dataset_id="q1", label="Issues", value_col="issues"),
+        ]
+    )
+    once = materialize(doc, {"q1": _dataset()})
+    # Re-running against no datasets would degrade to notes if the blocks still
+    # looked like authoring blocks.
+    twice = materialize(once, {})
+
+    assert [type(b) for b in twice.blocks] == [Table, Chart, Stat]
+    assert twice.blocks[0].rows == once.blocks[0].rows
+    assert twice.blocks[1].series == once.blocks[1].series
+    assert twice.blocks[2].value == once.blocks[2].value
+
+
 def test_materialize_all_columns_when_omitted():
     doc = Document(blocks=[Table(dataset_id="q1")])
     out = materialize(doc, {"q1": _dataset()})

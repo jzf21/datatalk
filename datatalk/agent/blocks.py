@@ -169,7 +169,10 @@ def _materialize_table(block: Table, datasets: dict[str, Any]) -> Any:
         return _note(f"table unavailable: unknown column(s) {', '.join(missing)}")
     idx = [ds.columns.index(c) for c in cols]
     rows = [[row[i] for i in idx] for row in ds.rows]
-    return Table(columns=list(cols), rows=rows)
+    # dataset_id survives materialization so the UI can cite the query behind
+    # every number. It is not what makes a block "authoring" -- ``rows is None``
+    # is (see ``_is_authoring_table``).
+    return Table(dataset_id=block.dataset_id, columns=list(cols), rows=rows)
 
 
 def _materialize_chart(block: Chart, datasets: dict[str, Any]) -> Any:
@@ -193,6 +196,7 @@ def _materialize_chart(block: Chart, datasets: dict[str, Any]) -> Any:
     return Chart(
         chart_type=block.chart_type,
         title=block.title,
+        dataset_id=block.dataset_id,
         x={"label": block.x_col, "values": x_values},
         series=series,
     )
@@ -242,6 +246,7 @@ def _materialize_stat(block: Stat, datasets: dict[str, Any]) -> Any:
         delta, delta_pct = _compute_delta(value, prior)
     return Stat(
         label=block.label, unit=block.unit, width=_clamp_width(block.width),
+        dataset_id=block.dataset_id,
         value=value, delta=delta, delta_pct=delta_pct,
     )
 
