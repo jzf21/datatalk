@@ -71,6 +71,22 @@ class Settings(BaseSettings):
     # Storage
     datatalk_db_path: str = Field(default="datatalk.sqlite3", alias="DATATALK_DB_PATH")
 
+    # Web / CORS
+    # Comma-separated browser origins allowed to call the API (the Next.js
+    # frontend runs on its own origin). Empty = no CORS headers at all.
+    cors_allow_origins: str = Field(
+        default="http://localhost:3000,http://127.0.0.1:3000",
+        alias="DATATALK_CORS_ORIGINS",
+    )
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [
+            o.strip().rstrip("/")
+            for o in self.cors_allow_origins.split(",")
+            if o.strip()
+        ]
+
     @property
     def has_openai(self) -> bool:
         return bool(self.openai_api_key and self.openai_api_key != "sk-...")

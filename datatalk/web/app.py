@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -28,6 +29,21 @@ from datatalk.llm import client as llm_client
 from datatalk.memory.store import MemoryStore
 
 app = FastAPI(title="DataTalk", version="0.1.0")
+
+# The frontend runs on its own origin, so the browser preflights every JSON POST.
+# Read at import time because middleware must be registered before startup.
+_cors_origins = get_settings().cors_origin_list
+if _cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,
+        # No cookies or auth headers are used anywhere; never pair credentials
+        # with a wildcard.
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+        allow_headers=["Content-Type"],
+        max_age=3600,
+    )
 
 _STATIC = Path(__file__).parent / "static"
 
