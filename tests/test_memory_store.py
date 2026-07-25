@@ -1,48 +1,25 @@
-"""Memory store tests with a deterministic fake embedder (no API, temp DB)."""
+"""Memory store tests.
 
-import sqlite3
+The `store` fixture (tests/conftest.py) supplies an org-scoped store bound to a
+rolled-back Postgres transaction and a deterministic keyword embedder, so
+cosine rankings stay predictable.
+"""
 
-import numpy as np
-
-import datatalk.memory.store as store_mod
 from datatalk.agent.blocks import Document, Heading, Paragraph, Table
-from datatalk.memory.store import MemoryStore
 
 
-def _fake_embed_factory():
-    """Map keywords to distinct directions so cosine similarity is predictable."""
-    vocab = ["sla", "revenue", "bug", "account", "sprint"]
-
-    def fake_embed(texts, ctx=None):
-        out = []
-        for t in texts:
-            v = np.zeros(len(vocab), dtype=np.float32)
-            low = t.lower()
-            for i, w in enumerate(vocab):
-                if w in low:
-                    v[i] += 1.0
-            if not v.any():
-                v[0] = 0.01  # avoid zero vector
-            out.append(v.tolist())
-        return out
-
-    return fake_embed
 
 
-def _store(tmp_path, monkeypatch):
-    monkeypatch.setattr(store_mod, "embed", _fake_embed_factory())
-    return MemoryStore(path=str(tmp_path / "mem.sqlite3"))
 
-
-def test_add_and_list_suggestions(tmp_path, monkeypatch):
-    s = _store(tmp_path, monkeypatch)
+def test_add_and_list_suggestions(store):
+    s = store
     s.add_suggestion("For SLA metrics use the jira.sla table")
     s.add_suggestion("Revenue lives in billing.invoices")
     assert len(s.all_suggestions()) == 2
 
 
-def test_retrieval_ranks_relevant_first(tmp_path, monkeypatch):
-    s = _store(tmp_path, monkeypatch)
+def test_retrieval_ranks_relevant_first(store):
+    s = store
     s.add_suggestion("For SLA metrics use the jira.sla table")
     s.add_suggestion("Revenue lives in billing.invoices")
     s.add_suggestion("Bug counts come from jira.bugs")
@@ -51,8 +28,8 @@ def test_retrieval_ranks_relevant_first(tmp_path, monkeypatch):
     assert top == ["For SLA metrics use the jira.sla table"]
 
 
-def test_delete_suggestion(tmp_path, monkeypatch):
-    s = _store(tmp_path, monkeypatch)
+def test_delete_suggestion(store):
+    s = store
     added = s.add_suggestion("account grouping should use account_id")
     s.delete_suggestion(added.id)
     assert s.all_suggestions() == []
@@ -82,8 +59,8 @@ def _sample_doc():
     )
 
 
-def test_save_and_get_report(tmp_path, monkeypatch):
-    s = _store(tmp_path, monkeypatch)
+def test_save_and_get_report(store):
+    s = store
     doc = _sample_doc()
     queries = [{"dataset_id": "q1", "sql": "SELECT ...", "row_count": 1, "columns": ["month", "issues"]}]
     saved = s.save_report("count issues", doc, queries)
@@ -99,8 +76,8 @@ def test_save_and_get_report(tmp_path, monkeypatch):
     assert s.get_report(9999) is None
 
 
-def test_qa_turns_crud(tmp_path, monkeypatch):
-    s = _store(tmp_path, monkeypatch)
+def test_qa_turns_crud(store):
+    s = store
     saved = s.save_report("a report", _sample_doc(), [])
     assert s.list_qa_turns(saved.id) == []
 
@@ -116,36 +93,3 @@ def test_qa_turns_crud(tmp_path, monkeypatch):
     assert turns[0].queries == q
 
 
-def test_migration_adds_columns_without_data_loss(tmp_path, monkeypatch):
-    """An old DB with a reports table lacking document/queries migrates cleanly."""
-    db_path = str(tmp_path / "old.sqlite3")
-    old = sqlite3.connect(db_path)
-    old.executescript(
-        """
-        CREATE TABLE reports (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            request TEXT NOT NULL,
-            markdown TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-        INSERT INTO reports (request, markdown, created_at)
-        VALUES ('legacy', '# Old report', '2026-01-01T00:00:00+00:00');
-        """
-    )
-    old.commit()
-    old.close()
-
-    monkeypatch.setattr(store_mod, "embed", _fake_embed_factory())
-    s = MemoryStore(path=db_path)
-
-    # Old row survives; new columns exist and default to empty/None.
-    fetched = s.get_report(1)
-    assert fetched is not None
-    assert fetched.request == "legacy"
-    assert fetched.markdown == "# Old report"
-    assert fetched.document.blocks == []
-    assert fetched.queries == []
-
-    # And new saves work on the migrated DB.
-    saved = s.save_report("new one", _sample_doc(), [])
-    assert s.get_report(saved.id) is not None

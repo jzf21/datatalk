@@ -1,25 +1,39 @@
-"""Few-shot memory + report persistence (Milestone 5).
+"""Org-scoped memory + report persistence (Postgres).
 
-"Training from user suggestions" is implemented as retrieval-augmented prompting:
-user suggestions are stored with an embedding; at report time the most relevant
-ones are retrieved and injected into the prompt. No model fine-tuning required.
+"Training from user suggestions" is retrieval-augmented prompting: suggestions
+are stored with an embedding, and the most relevant ones are injected into the
+prompt at generation time. No fine-tuning involved.
 
-Also stores generated reports so analysis can reference "own" reports by id.
+Two invariants this module exists to hold:
+
+1. **Every read filters by org_id; every write stamps it.** Reads go through
+   :meth:`MemoryStore._scoped`, so "does this query leak across tenants?" is
+   answerable by grepping for ``select(`` outside that helper.
+
+2. **No ORM instance ever escapes.** Every method returns a plain dataclass.
+   The streaming endpoints in ``web/app.py`` read these from a *different*
+   thread than the one that loaded them, minutes later; a live ORM object there
+   would lazy-load against a closed session and raise DetachedInstanceError.
+
+The store does not commit. Transaction boundaries belong to the caller
+(:func:`datatalk.db.session.session_scope`), so several writes compose into one
+transaction and a failure mid-stream leaves nothing half-persisted.
 """
 
 from __future__ import annotations
 
-import json
-import sqlite3
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
+from uuid import UUID
 
 import numpy as np
+from sqlalchemy import Select, delete, select, update
+from sqlalchemy.orm import Session
 
 from datatalk.agent.blocks import Document, document_to_text
-from datatalk.config import Settings, get_settings
 from datatalk.context import TenantContext
+from datatalk.db import models
 from datatalk.llm.client import embed
 
 
@@ -29,6 +43,7 @@ class Suggestion:
     text: str
     created_at: str
     score: float = 0.0
+    created_by_user_id: UUID | None = None
 
 
 @dataclass
@@ -39,6 +54,7 @@ class SavedReport:
     created_at: str
     document: Document = field(default_factory=Document)
     queries: list[dict[str, Any]] = field(default_factory=list)
+    created_by_user_id: UUID | None = None
 
 
 @dataclass
@@ -49,6 +65,7 @@ class QATurn:
     answer_document: Document
     queries: list[dict[str, Any]]
     created_at: str
+    created_by_user_id: UUID | None = None
 
 
 @dataclass
@@ -60,87 +77,42 @@ class SavedDashboard:
     document: Document = field(default_factory=Document)
     queries: list[dict[str, Any]] = field(default_factory=list)
     analysis: str | None = None
+    created_by_user_id: UUID | None = None
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+def _iso(value: datetime | None) -> str:
+    """Timestamps cross the wire as ISO-8601 strings, as they always have."""
+    return value.isoformat() if value is not None else ""
+
+
+class CrossOrgError(PermissionError):
+    """An operation referenced a resource belonging to another org."""
 
 
 class MemoryStore:
-    """SQLite-backed store for suggestions (few-shot memory) and reports."""
+    """Postgres-backed, org-scoped store.
 
-    def __init__(
-        self,
-        settings: Settings | None = None,
-        path: str | None = None,
-        ctx: TenantContext | None = None,
-    ):
-        settings = settings or get_settings()
-        # Embeddings now resolve their OpenAI client through a context. This
-        # store is replaced wholesale by the Postgres, org-scoped one; until
-        # then it falls back to the environment context.
-        self.ctx = ctx or TenantContext.from_env()
-        self.path = path or settings.datatalk_db_path
-        # check_same_thread=False: the web layer may touch a store from the
-        # request thread and its streaming generator thread.
-        self._conn = sqlite3.connect(self.path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._init_schema()
+    Construct one per unit of work around a session you own::
 
-    def _init_schema(self) -> None:
-        self._conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS suggestions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                text TEXT NOT NULL,
-                embedding BLOB NOT NULL,
-                created_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS reports (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                request TEXT NOT NULL,
-                markdown TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS qa_turns (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                report_id INTEGER NOT NULL,
-                question TEXT NOT NULL,
-                answer_document TEXT NOT NULL,
-                queries TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS dashboards (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                request TEXT NOT NULL,
-                title TEXT NOT NULL,
-                document TEXT NOT NULL,
-                queries TEXT NOT NULL,
-                analysis TEXT,
-                created_at TEXT NOT NULL
-            );
-            """
-        )
-        self._migrate()
-        self._conn.commit()
+        with session_scope() as db:
+            store = MemoryStore(db, ctx=ctx)
+            store.save_report(...)
+    """
 
-    def _migrate(self) -> None:
-        """Idempotent add-column migration for the block-document feature.
+    def __init__(self, session: Session, *, ctx: TenantContext):
+        self._db = session
+        self.ctx = ctx
+        self.org_id = ctx.org_id
+        self.user_id = ctx.user_id
 
-        Older databases have a ``reports`` table with only ``markdown``; add the
-        canonical ``document`` and ``queries`` JSON columns without data loss.
-        """
-        cols = {
-            row["name"]
-            for row in self._conn.execute("PRAGMA table_info(reports)").fetchall()
-        }
-        if "document" not in cols:
-            self._conn.execute("ALTER TABLE reports ADD COLUMN document TEXT")
-        if "queries" not in cols:
-            self._conn.execute("ALTER TABLE reports ADD COLUMN queries TEXT")
+    # --- scoping ---
+
+    def _scoped(self, model: type) -> Select:
+        """The only way reads should enter this class."""
+        return select(model).where(model.org_id == self.org_id)
 
     def close(self) -> None:
-        self._conn.close()
+        """No-op. Session lifetime belongs to the caller (session_scope)."""
 
     # --- suggestions (few-shot memory) ---
 
@@ -148,44 +120,86 @@ class MemoryStore:
         text = (text or "").strip()
         if not text:
             raise ValueError("Suggestion text is empty.")
+
         vec = np.asarray(embed([text], self.ctx)[0], dtype=np.float32)
-        created = _now()
-        cur = self._conn.execute(
-            "INSERT INTO suggestions (text, embedding, created_at) VALUES (?, ?, ?)",
-            (text, vec.tobytes(), created),
+        row = models.Suggestion(
+            org_id=self.org_id,
+            created_by_user_id=self.user_id,
+            text_=text,
+            embedding=vec.tobytes(),
+            embedding_dim=int(vec.shape[0]),
+            embedding_model=self.ctx.settings.openai_embed_model,
         )
-        self._conn.commit()
-        return Suggestion(id=cur.lastrowid, text=text, created_at=created)
+        self._db.add(row)
+        self._db.flush()  # populate row.id without committing
+        return Suggestion(
+            id=row.id,
+            text=text,
+            created_at=_iso(row.created_at),
+            created_by_user_id=row.created_by_user_id,
+        )
 
     def all_suggestions(self) -> list[Suggestion]:
-        rows = self._conn.execute(
-            "SELECT id, text, created_at FROM suggestions ORDER BY id DESC"
-        ).fetchall()
-        return [Suggestion(id=r["id"], text=r["text"], created_at=r["created_at"]) for r in rows]
+        rows = self._db.execute(
+            self._scoped(models.Suggestion).order_by(models.Suggestion.id.desc())
+        ).scalars()
+        return [
+            Suggestion(
+                id=r.id,
+                text=r.text_,
+                created_at=_iso(r.created_at),
+                created_by_user_id=r.created_by_user_id,
+            )
+            for r in rows
+        ]
 
-    def delete_suggestion(self, suggestion_id: int) -> None:
-        self._conn.execute("DELETE FROM suggestions WHERE id = ?", (suggestion_id,))
-        self._conn.commit()
+    def delete_suggestion(self, suggestion_id: int) -> bool:
+        """Return whether a row was deleted.
+
+        Returns False for another org's id rather than reporting success -- the
+        endpoint turns that into a 404.
+        """
+        result = self._db.execute(
+            delete(models.Suggestion)
+            .where(models.Suggestion.id == suggestion_id)
+            .where(models.Suggestion.org_id == self.org_id)
+        )
+        return bool(result.rowcount)
 
     def retrieve_suggestions(self, query: str, k: int = 5) -> list[Suggestion]:
-        """Return up to ``k`` suggestions most relevant to ``query`` (cosine)."""
-        rows = self._conn.execute(
-            "SELECT id, text, embedding, created_at FROM suggestions"
-        ).fetchall()
-        if not rows:
-            return []
+        """Return up to ``k`` of this org's suggestions most similar to ``query``.
 
+        Brute-force cosine in numpy. Suggestions are hand-written hints numbering
+        in the tens per org, so an ANN index would add deployment friction to
+        solve a problem that does not exist. ``memory_max_candidates`` bounds the
+        scan so one org cannot grow it without limit.
+        """
+        model_name = self.ctx.settings.openai_embed_model
         q = np.asarray(embed([query], self.ctx)[0], dtype=np.float32)
-        q_norm = q / (np.linalg.norm(q) + 1e-8)
 
+        rows = self._db.execute(
+            self._scoped(models.Suggestion)
+            # Vectors from different models have different dimensions; mixing
+            # them makes np.dot raise and (because the web layer swallows
+            # retrieval errors) silently disables memory entirely.
+            .where(models.Suggestion.embedding_dim == int(q.shape[0]))
+            .where(models.Suggestion.embedding_model == model_name)
+            .order_by(models.Suggestion.id.desc())
+            .limit(self.ctx.settings.memory_max_candidates)
+        ).scalars()
+
+        q_norm = q / (np.linalg.norm(q) + 1e-8)
         scored: list[Suggestion] = []
         for r in rows:
-            vec = np.frombuffer(r["embedding"], dtype=np.float32)
+            vec = np.frombuffer(r.embedding, dtype=np.float32)
             vec_norm = vec / (np.linalg.norm(vec) + 1e-8)
-            score = float(np.dot(q_norm, vec_norm))
             scored.append(
                 Suggestion(
-                    id=r["id"], text=r["text"], created_at=r["created_at"], score=score
+                    id=r.id,
+                    text=r.text_,
+                    created_at=_iso(r.created_at),
+                    score=float(np.dot(q_norm, vec_norm)),
+                    created_by_user_id=r.created_by_user_id,
                 )
             )
         scored.sort(key=lambda s: s.score, reverse=True)
@@ -204,59 +218,51 @@ class MemoryStore:
     ) -> SavedReport:
         """Persist a report. ``markdown`` is derived from the Document so the
         Analyze agent and memory retrieval keep working unchanged."""
-        created = _now()
         queries = queries or []
         markdown = document_to_text(document)
-        cur = self._conn.execute(
-            "INSERT INTO reports (request, markdown, document, queries, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (
-                request,
-                markdown,
-                json.dumps(document.to_dict(), default=str),
-                json.dumps(queries, default=str),
-                created,
-            ),
-        )
-        self._conn.commit()
-        return SavedReport(
-            id=cur.lastrowid,
+        row = models.Report(
+            org_id=self.org_id,
+            created_by_user_id=self.user_id,
             request=request,
             markdown=markdown,
-            created_at=created,
-            document=document,
+            document=document.to_dict(),
             queries=queries,
         )
-
-    def _row_to_report(self, r: sqlite3.Row) -> SavedReport:
-        document = Document.from_dict(json.loads(r["document"])) if r["document"] else Document()
-        queries = json.loads(r["queries"]) if r["queries"] else []
+        self._db.add(row)
+        self._db.flush()
         return SavedReport(
-            id=r["id"],
-            request=r["request"],
-            markdown=r["markdown"],
-            created_at=r["created_at"],
+            id=row.id,
+            request=request,
+            markdown=markdown,
+            created_at=_iso(row.created_at),
             document=document,
             queries=queries,
+            created_by_user_id=row.created_by_user_id,
+        )
+
+    @staticmethod
+    def _to_report(r: models.Report) -> SavedReport:
+        return SavedReport(
+            id=r.id,
+            request=r.request,
+            markdown=r.markdown,
+            created_at=_iso(r.created_at),
+            document=Document.from_dict(r.document or {}),
+            queries=list(r.queries or []),
+            created_by_user_id=r.created_by_user_id,
         )
 
     def get_report(self, report_id: int) -> SavedReport | None:
-        r = self._conn.execute(
-            "SELECT id, request, markdown, document, queries, created_at "
-            "FROM reports WHERE id = ?",
-            (report_id,),
-        ).fetchone()
-        if not r:
-            return None
-        return self._row_to_report(r)
+        row = self._db.execute(
+            self._scoped(models.Report).where(models.Report.id == report_id)
+        ).scalar_one_or_none()
+        return self._to_report(row) if row else None
 
     def list_reports(self, limit: int = 50) -> list[SavedReport]:
-        rows = self._conn.execute(
-            "SELECT id, request, markdown, document, queries, created_at "
-            "FROM reports ORDER BY id DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-        return [self._row_to_report(r) for r in rows]
+        rows = self._db.execute(
+            self._scoped(models.Report).order_by(models.Report.id.desc()).limit(limit)
+        ).scalars()
+        return [self._to_report(r) for r in rows]
 
     # --- Q&A turns ---
 
@@ -267,43 +273,47 @@ class MemoryStore:
         answer_document: Document,
         queries: list[dict[str, Any]] | None = None,
     ) -> QATurn:
-        created = _now()
+        # The composite FK (report_id, org_id) already makes a cross-org turn
+        # impossible; checking first turns an IntegrityError into a clear error.
+        if self.get_report(report_id) is None:
+            raise CrossOrgError(f"Report {report_id} does not belong to this org.")
+
         queries = queries or []
-        cur = self._conn.execute(
-            "INSERT INTO qa_turns (report_id, question, answer_document, queries, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (
-                report_id,
-                question,
-                json.dumps(answer_document.to_dict(), default=str),
-                json.dumps(queries, default=str),
-                created,
-            ),
+        row = models.QATurn(
+            org_id=self.org_id,
+            report_id=report_id,
+            created_by_user_id=self.user_id,
+            question=question,
+            answer_document=answer_document.to_dict(),
+            queries=queries,
         )
-        self._conn.commit()
+        self._db.add(row)
+        self._db.flush()
         return QATurn(
-            id=cur.lastrowid,
+            id=row.id,
             report_id=report_id,
             question=question,
             answer_document=answer_document,
             queries=queries,
-            created_at=created,
+            created_at=_iso(row.created_at),
+            created_by_user_id=row.created_by_user_id,
         )
 
     def list_qa_turns(self, report_id: int) -> list[QATurn]:
-        rows = self._conn.execute(
-            "SELECT id, report_id, question, answer_document, queries, created_at "
-            "FROM qa_turns WHERE report_id = ? ORDER BY id ASC",
-            (report_id,),
-        ).fetchall()
+        rows = self._db.execute(
+            self._scoped(models.QATurn)
+            .where(models.QATurn.report_id == report_id)
+            .order_by(models.QATurn.id.asc())
+        ).scalars()
         return [
             QATurn(
-                id=r["id"],
-                report_id=r["report_id"],
-                question=r["question"],
-                answer_document=Document.from_dict(json.loads(r["answer_document"])),
-                queries=json.loads(r["queries"]) if r["queries"] else [],
-                created_at=r["created_at"],
+                id=r.id,
+                report_id=r.report_id,
+                question=r.question,
+                answer_document=Document.from_dict(r.answer_document or {}),
+                queries=list(r.queries or []),
+                created_at=_iso(r.created_at),
+                created_by_user_id=r.created_by_user_id,
             )
             for r in rows
         ]
@@ -313,7 +323,7 @@ class MemoryStore:
     @staticmethod
     def _derive_title(request: str) -> str:
         title = (request or "").strip().splitlines()[0] if (request or "").strip() else ""
-        return (title[:80] or "Dashboard")
+        return title[:80] or "Dashboard"
 
     def save_dashboard(
         self,
@@ -322,64 +332,63 @@ class MemoryStore:
         queries: list[dict[str, Any]] | None = None,
         title: str | None = None,
     ) -> SavedDashboard:
-        created = _now()
         queries = queries or []
         title = title or self._derive_title(request)
-        cur = self._conn.execute(
-            "INSERT INTO dashboards (request, title, document, queries, analysis, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (
-                request,
-                title,
-                json.dumps(document.to_dict(), default=str),
-                json.dumps(queries, default=str),
-                None,
-                created,
-            ),
-        )
-        self._conn.commit()
-        return SavedDashboard(
-            id=cur.lastrowid,
+        row = models.Dashboard(
+            org_id=self.org_id,
+            created_by_user_id=self.user_id,
             request=request,
             title=title,
-            created_at=created,
-            document=document,
+            document=document.to_dict(),
             queries=queries,
             analysis=None,
         )
-
-    def _row_to_dashboard(self, r: sqlite3.Row) -> SavedDashboard:
-        document = Document.from_dict(json.loads(r["document"])) if r["document"] else Document()
-        queries = json.loads(r["queries"]) if r["queries"] else []
+        self._db.add(row)
+        self._db.flush()
         return SavedDashboard(
-            id=r["id"],
-            request=r["request"],
-            title=r["title"],
-            created_at=r["created_at"],
+            id=row.id,
+            request=request,
+            title=title,
+            created_at=_iso(row.created_at),
             document=document,
             queries=queries,
-            analysis=r["analysis"],
+            analysis=None,
+            created_by_user_id=row.created_by_user_id,
+        )
+
+    @staticmethod
+    def _to_dashboard(r: models.Dashboard) -> SavedDashboard:
+        return SavedDashboard(
+            id=r.id,
+            request=r.request,
+            title=r.title,
+            created_at=_iso(r.created_at),
+            document=Document.from_dict(r.document or {}),
+            queries=list(r.queries or []),
+            analysis=r.analysis,
+            created_by_user_id=r.created_by_user_id,
         )
 
     def get_dashboard(self, dashboard_id: int) -> SavedDashboard | None:
-        r = self._conn.execute(
-            "SELECT id, request, title, document, queries, analysis, created_at "
-            "FROM dashboards WHERE id = ?",
-            (dashboard_id,),
-        ).fetchone()
-        return self._row_to_dashboard(r) if r else None
+        row = self._db.execute(
+            self._scoped(models.Dashboard).where(models.Dashboard.id == dashboard_id)
+        ).scalar_one_or_none()
+        return self._to_dashboard(row) if row else None
 
     def list_dashboards(self, limit: int = 50) -> list[SavedDashboard]:
-        rows = self._conn.execute(
-            "SELECT id, request, title, document, queries, analysis, created_at "
-            "FROM dashboards ORDER BY id DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-        return [self._row_to_dashboard(r) for r in rows]
+        rows = self._db.execute(
+            self._scoped(models.Dashboard)
+            .order_by(models.Dashboard.id.desc())
+            .limit(limit)
+        ).scalars()
+        return [self._to_dashboard(r) for r in rows]
 
-    def set_dashboard_analysis(self, dashboard_id: int, analysis: str) -> None:
-        self._conn.execute(
-            "UPDATE dashboards SET analysis = ? WHERE id = ?",
-            (analysis, dashboard_id),
+    def set_dashboard_analysis(self, dashboard_id: int, analysis: str) -> bool:
+        """Return whether a row was updated (False for another org's id)."""
+        result = self._db.execute(
+            update(models.Dashboard)
+            .where(models.Dashboard.id == dashboard_id)
+            .where(models.Dashboard.org_id == self.org_id)
+            .values(analysis=analysis)
         )
-        self._conn.commit()
+        return bool(result.rowcount)
