@@ -18,24 +18,24 @@ from __future__ import annotations
 
 import sys
 
-from datatalk.config import get_settings
+from datatalk.context import TenantContext
 
 
 def _print_header(title: str) -> None:
     print(f"\n=== {title} ===")
 
 
-def check_clickhouse() -> bool:
+def check_clickhouse(ctx: TenantContext) -> bool:
     from datatalk.db import clickhouse, introspect
 
     _print_header("ClickHouse")
-    settings = get_settings()
+    settings = ctx.settings
     print(
         f"Connecting to {settings.clickhouse_host}:{settings.clickhouse_port} "
         f"(db={settings.clickhouse_database}, secure={settings.clickhouse_secure})"
     )
     try:
-        info = clickhouse.ping()
+        info = clickhouse.ping(ctx.clickhouse)
     except Exception as exc:  # noqa: BLE001 - surface any driver error
         print(f"  FAILED: {exc}")
         return False
@@ -44,7 +44,7 @@ def check_clickhouse() -> bool:
 
     _print_header("Schema discovery")
     try:
-        tables = introspect.introspect(with_samples=True)
+        tables = introspect.introspect(ctx.clickhouse, ctx.settings, with_samples=True)
     except Exception as exc:  # noqa: BLE001
         print(f"  FAILED to introspect: {exc}")
         return False
@@ -69,16 +69,16 @@ def check_clickhouse() -> bool:
     return True
 
 
-def check_openai() -> bool:
+def check_openai(ctx: TenantContext) -> bool:
     _print_header("OpenAI")
-    settings = get_settings()
+    settings = ctx.settings
     if not settings.has_openai:
         print("  SKIPPED: OPENAI_API_KEY not set (copy .env.example to .env).")
         return False
     try:
         from datatalk.llm import client
 
-        reply = client.ping()
+        reply = client.ping(ctx)
     except Exception as exc:  # noqa: BLE001
         print(f"  FAILED: {exc}")
         return False
@@ -88,8 +88,11 @@ def check_openai() -> bool:
 
 def main() -> int:
     print("DataTalk connection checkout")
-    ch_ok = check_clickhouse()
-    oa_ok = check_openai()
+    # A single-tenant context straight from .env: this script predates orgs and
+    # checks the environment's own credentials.
+    ctx = TenantContext.from_env()
+    ch_ok = check_clickhouse(ctx)
+    oa_ok = check_openai(ctx)
 
     _print_header("Summary")
     print(f"  ClickHouse: {'OK' if ch_ok else 'FAILED'}")

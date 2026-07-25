@@ -7,13 +7,17 @@ Nothing about the target schema is hardcoded. We read ClickHouse's own
 
 from __future__ import annotations
 
+import threading
+import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from clickhouse_connect.driver.client import Client
 
-from datatalk.config import Settings, get_settings
-from datatalk.db.clickhouse import get_client
+from datatalk.config import Settings
+
+if TYPE_CHECKING:  # avoid a circular import: context -> clients -> db.clickhouse
+    from datatalk.context import TenantContext
 
 
 @dataclass
@@ -47,11 +51,7 @@ _SYSTEM_DATABASES = {
 }
 
 
-def list_databases(
-    client: Client | None = None, settings: Settings | None = None
-) -> list[str]:
-    client = client or get_client()
-    settings = settings or get_settings()
+def list_databases(client: Client, settings: Settings) -> list[str]:
     rows = client.query("SHOW DATABASES").result_rows
     names = [r[0] for r in rows if r[0] not in _SYSTEM_DATABASES]
 
@@ -114,14 +114,12 @@ def _fetch_sample_rows(
 
 
 def introspect(
-    client: Client | None = None,
-    settings: Settings | None = None,
+    client: Client,
+    settings: Settings,
     *,
     with_samples: bool = True,
 ) -> list[Table]:
     """Discover all user tables with columns and (optionally) sample rows."""
-    client = client or get_client()
-    settings = settings or get_settings()
     exclude = settings.introspect_exclude_list
 
     tables: list[Table] = []
@@ -196,17 +194,62 @@ def schema_summary(tables: list[Table]) -> str:
 
 
 # --- cached schema context for the agent ---
+#
+# Keyed by (org_id, connection fingerprint). This used to be a dict with a
+# single hardcoded "context" key, which under multi-tenancy leaks one org's
+# table names, column names AND sample row values into another org's prompts.
+#
+# The org id is redundant with the fingerprint for isolation purposes (identical
+# credentials produce identical schemas), but including it makes
+# invalidate_schema(org_id) trivial and makes "is this cross-tenant safe?"
+# answerable without reasoning about hash collisions.
 
-_SCHEMA_CACHE: dict[str, str] = {}
+
+@dataclass
+class _CachedSchema:
+    context: str
+    built_at: float
 
 
-def get_schema_context(force_refresh: bool = False) -> str:
-    """Return the cached schema-context string, introspecting on first use.
+_SCHEMA_CACHE: dict[tuple[Any, str], _CachedSchema] = {}
+_SCHEMA_LOCK = threading.Lock()
+_SCHEMA_TTL = 3600.0
 
-    The agent calls this on every report; introspection is comparatively
-    expensive, so the result is cached until ``force_refresh=True``.
+
+def get_schema_context(ctx: "TenantContext", *, force_refresh: bool = False) -> str:
+    """Return this org's schema-context string, introspecting on a miss.
+
+    The agent calls this on every report and introspection is comparatively
+    expensive, so results are cached per org for ``_SCHEMA_TTL`` seconds.
     """
-    if force_refresh or "context" not in _SCHEMA_CACHE:
-        tables = introspect(with_samples=True)
-        _SCHEMA_CACHE["context"] = build_schema_context(tables)
-    return _SCHEMA_CACHE["context"]
+    key = (ctx.org_id, ctx.fingerprint)
+
+    if not force_refresh:
+        with _SCHEMA_LOCK:
+            hit = _SCHEMA_CACHE.get(key)
+        if hit is not None and (time.monotonic() - hit.built_at) < _SCHEMA_TTL:
+            return hit.context
+
+    # Deliberately outside the lock: this is a multi-second ClickHouse round
+    # trip, and holding the lock would serialize every org behind the slowest.
+    tables = introspect(ctx.clickhouse, ctx.settings, with_samples=True)
+    context = build_schema_context(tables)
+
+    with _SCHEMA_LOCK:
+        _SCHEMA_CACHE[key] = _CachedSchema(context, time.monotonic())
+    return context
+
+
+def invalidate_schema(org_id: Any, fingerprint: str | None = None) -> None:
+    """Drop cached schema for an org (all fingerprints unless one is given).
+
+    Called when an org edits its ClickHouse connection.
+    """
+    with _SCHEMA_LOCK:
+        stale = [
+            k
+            for k in _SCHEMA_CACHE
+            if k[0] == org_id and (fingerprint is None or k[1] == fingerprint)
+        ]
+        for k in stale:
+            _SCHEMA_CACHE.pop(k, None)

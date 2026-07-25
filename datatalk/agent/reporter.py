@@ -6,12 +6,15 @@ the orchestrator materializes those references into concrete values.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from datatalk.agent.blocks import Document, parse_json_object
 from datatalk.agent.planner import Section, plan_to_text
 from datatalk.agent.sqlloop import dataset_previews
-from datatalk.config import Settings, get_settings
-from datatalk.llm.client import get_openai
 from datatalk.llm.prompts import BLOCK_SCHEMA_DOC, REPORTER_SYSTEM, _ANTI_FABRICATION
+
+if TYPE_CHECKING:
+    from datatalk.context import TenantContext
 
 
 def write_report(
@@ -19,11 +22,9 @@ def write_report(
     sections: list[Section],
     datasets: dict,
     *,
-    settings: Settings | None = None,
+    ctx: "TenantContext",
 ) -> Document:
     """Return an *authoring* Document referencing the captured datasets by id."""
-    settings = settings or get_settings()
-    client = get_openai()
     system = REPORTER_SYSTEM.format(
         block_schema=BLOCK_SCHEMA_DOC, anti_fabrication=_ANTI_FABRICATION
     )
@@ -33,8 +34,8 @@ def write_report(
         f"Captured datasets (reference these by dataset_id):\n"
         f"{dataset_previews(datasets)}"
     )
-    resp = client.chat.completions.create(
-        model=settings.openai_model,
+    resp = ctx.openai.chat.completions.create(
+        model=ctx.model,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},

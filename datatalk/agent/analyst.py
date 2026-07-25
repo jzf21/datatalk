@@ -6,26 +6,27 @@ of the plan, capturing each successful query as an addressable dataset.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from datatalk.agent.planner import Section, plan_to_text
 from datatalk.agent.sqlloop import EventFn, LoopResult, run_capture_loop
-from datatalk.config import Settings, get_settings
-from datatalk.llm.client import get_openai
 from datatalk.llm.prompts import ANALYST_SYSTEM, _ANTI_FABRICATION
+
+if TYPE_CHECKING:
+    from datatalk.context import TenantContext
 
 
 def gather_data(
     request: str,
     sections: list[Section],
     *,
+    ctx: "TenantContext",
     schema_context: str,
     memory_block: str = "",
     on_event: EventFn | None = None,
     max_steps: int = 8,
-    settings: Settings | None = None,
 ) -> LoopResult:
     """Query ClickHouse to cover the plan; return captured datasets + history."""
-    settings = settings or get_settings()
-    client = get_openai()
     system = ANALYST_SYSTEM.format(
         anti_fabrication=_ANTI_FABRICATION,
         schema_context=schema_context,
@@ -40,10 +41,8 @@ def gather_data(
         {"role": "user", "content": user},
     ]
     return run_capture_loop(
-        client,
-        settings.openai_model,
         messages,
+        ctx=ctx,
         max_steps=max_steps,
         on_event=on_event,
-        settings=settings,
     )

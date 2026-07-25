@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from datatalk.agent.blocks import Document, materialize, parse_json_object
 from datatalk.agent.sqlloop import EventFn, run_capture_loop
-from datatalk.config import Settings, get_settings
-from datatalk.llm.client import get_openai
 from datatalk.llm.prompts import BLOCK_SCHEMA_DOC, QA_SYSTEM, _ANTI_FABRICATION
+
+if TYPE_CHECKING:
+    from datatalk.context import TenantContext
 
 
 @dataclass
@@ -29,22 +30,19 @@ class QAResult:
 def answer_question(
     question: str,
     *,
+    ctx: "TenantContext",
     report_document: Document,
     prior_queries: list[dict[str, Any]] | None = None,
     conversation: list[dict[str, str]] | None = None,
     schema_context: str,
     on_event: EventFn | None = None,
     max_steps: int = 6,
-    settings: Settings | None = None,
 ) -> QAResult:
     """Answer ``question`` about ``report_document`` with a materialized Document.
 
     ``conversation`` is a list of prior ``{"question", "answer"}`` turns for
     context. ``prior_queries`` is the report's query history (sql/columns only).
     """
-    settings = settings or get_settings()
-    client = get_openai()
-
     system = QA_SYSTEM.format(
         block_schema=BLOCK_SCHEMA_DOC,
         anti_fabrication=_ANTI_FABRICATION,
@@ -75,12 +73,10 @@ def answer_question(
     ]
 
     loop = run_capture_loop(
-        client,
-        settings.openai_model,
         messages,
+        ctx=ctx,
         max_steps=max_steps,
         on_event=on_event,
-        settings=settings,
     )
 
     authoring = Document.from_dict(parse_json_object(loop.final_content))

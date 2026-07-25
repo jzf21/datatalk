@@ -19,6 +19,7 @@ import numpy as np
 
 from datatalk.agent.blocks import Document, document_to_text
 from datatalk.config import Settings, get_settings
+from datatalk.context import TenantContext
 from datatalk.llm.client import embed
 
 
@@ -68,8 +69,17 @@ def _now() -> str:
 class MemoryStore:
     """SQLite-backed store for suggestions (few-shot memory) and reports."""
 
-    def __init__(self, settings: Settings | None = None, path: str | None = None):
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        path: str | None = None,
+        ctx: TenantContext | None = None,
+    ):
         settings = settings or get_settings()
+        # Embeddings now resolve their OpenAI client through a context. This
+        # store is replaced wholesale by the Postgres, org-scoped one; until
+        # then it falls back to the environment context.
+        self.ctx = ctx or TenantContext.from_env()
         self.path = path or settings.datatalk_db_path
         # check_same_thread=False: the web layer may touch a store from the
         # request thread and its streaming generator thread.
@@ -138,7 +148,7 @@ class MemoryStore:
         text = (text or "").strip()
         if not text:
             raise ValueError("Suggestion text is empty.")
-        vec = np.asarray(embed([text])[0], dtype=np.float32)
+        vec = np.asarray(embed([text], self.ctx)[0], dtype=np.float32)
         created = _now()
         cur = self._conn.execute(
             "INSERT INTO suggestions (text, embedding, created_at) VALUES (?, ?, ?)",
@@ -165,7 +175,7 @@ class MemoryStore:
         if not rows:
             return []
 
-        q = np.asarray(embed([query])[0], dtype=np.float32)
+        q = np.asarray(embed([query], self.ctx)[0], dtype=np.float32)
         q_norm = q / (np.linalg.norm(q) + 1e-8)
 
         scored: list[Suggestion] = []

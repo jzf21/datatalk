@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from datatalk.agent.blocks import parse_json_object
-from datatalk.config import Settings, get_settings
-from datatalk.llm.client import get_openai
 from datatalk.llm.prompts import PLANNER_SYSTEM
+
+if TYPE_CHECKING:
+    from datatalk.context import TenantContext
 
 
 @dataclass
@@ -30,18 +31,16 @@ class Section:
 def plan_report(
     request: str,
     *,
+    ctx: "TenantContext",
     schema_context: str,
     memory_block: str = "",
-    settings: Settings | None = None,
 ) -> list[Section]:
     """Return an ordered list of planned report sections."""
-    settings = settings or get_settings()
-    client = get_openai()
     system = PLANNER_SYSTEM.format(
         schema_context=schema_context, memory_block=memory_block
     )
-    resp = client.chat.completions.create(
-        model=settings.openai_model,
+    resp = ctx.openai.chat.completions.create(
+        model=ctx.model,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": request},

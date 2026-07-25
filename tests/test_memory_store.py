@@ -13,7 +13,7 @@ def _fake_embed_factory():
     """Map keywords to distinct directions so cosine similarity is predictable."""
     vocab = ["sla", "revenue", "bug", "account", "sprint"]
 
-    def fake_embed(texts):
+    def fake_embed(texts, ctx=None):
         out = []
         for t in texts:
             v = np.zeros(len(vocab), dtype=np.float32)

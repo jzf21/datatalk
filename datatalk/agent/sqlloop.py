@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from datatalk.agent.executor import QueryResult, UnsafeSQLError, run_sql
-from datatalk.config import Settings
+
+if TYPE_CHECKING:
+    from datatalk.context import TenantContext
 
 # Progress callback (used by the web layer for NDJSON streaming).
 EventFn = Callable[[str, dict[str, Any]], None]
@@ -78,13 +80,11 @@ def _serialize_result(dataset_id: str, result: QueryResult) -> str:
 
 
 def run_capture_loop(
-    client: Any,
-    model: str,
     messages: list[dict[str, Any]],
     *,
+    ctx: "TenantContext",
     max_steps: int = 8,
     on_event: EventFn | None = None,
-    settings: Settings | None = None,
     start_index: int = 1,
 ) -> LoopResult:
     """Drive the tool-calling loop, capturing each successful query as a dataset.
@@ -93,7 +93,12 @@ def run_capture_loop(
     it is mutated in place. Datasets are keyed ``q{n}`` starting at
     ``start_index``. When the model stops calling tools, its final message text
     is returned in :attr:`LoopResult.final_content`.
+
+    Both the OpenAI client and the ClickHouse client come from ``ctx``, so a
+    loop can only ever touch the data of the org it was started for.
     """
+    openai = ctx.openai
+    model = ctx.model
 
     def emit(kind: str, data: dict[str, Any]) -> None:
         if on_event:
@@ -105,7 +110,7 @@ def run_capture_loop(
 
     for step in range(1, max_steps + 1):
         emit("status", {"message": f"Querying (step {step})…"})
-        resp = client.chat.completions.create(
+        resp = openai.chat.completions.create(
             model=model,
             messages=messages,
             tools=[RUN_SQL_TOOL],
@@ -148,7 +153,7 @@ def run_capture_loop(
 
             emit("sql", {"sql": sql})
             try:
-                result = run_sql(sql, settings=settings)
+                result = run_sql(sql, ctx=ctx)
                 dataset_id = f"q{idx}"
                 idx += 1
                 datasets[dataset_id] = result
@@ -192,7 +197,7 @@ def run_capture_loop(
             "content": "Stop querying and produce your final answer now with the data you have.",
         }
     )
-    resp = client.chat.completions.create(model=model, messages=messages, temperature=0)
+    resp = openai.chat.completions.create(model=model, messages=messages, temperature=0)
     return LoopResult(
         datasets=datasets,
         queries=queries,

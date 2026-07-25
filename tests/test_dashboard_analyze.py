@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import datatalk.agent.analyze as analyze_mod
 from datatalk.agent.blocks import Document, Row, Stat, materialize
 from datatalk.agent.executor import QueryResult
+from tests.conftest import make_ctx
 
 
 class _FakeCompletions:
@@ -24,9 +25,9 @@ class _FakeOpenAI:
         self.chat = SimpleNamespace(completions=self.completions)
 
 
-def test_analyze_dashboard_returns_markdown(monkeypatch):
+def test_analyze_dashboard_returns_markdown():
     fake = _FakeOpenAI("## Findings\nRevenue is up.")
-    monkeypatch.setattr(analyze_mod, "get_openai", lambda: fake)
+    ctx = make_ctx(openai=fake)
 
     ds = QueryResult(columns=["metric", "current", "prior"],
                      rows=[["revenue", 120, 100]], row_count=1,
@@ -39,7 +40,7 @@ def test_analyze_dashboard_returns_markdown(monkeypatch):
         {"q1": ds},
     )
 
-    out = analyze_mod.analyze_dashboard(doc, focus="growth")
+    out = analyze_mod.analyze_dashboard(doc, ctx=ctx, focus="growth")
     assert out == "## Findings\nRevenue is up."
     # The real numbers reach the model; the focus is included.
     assert "Revenue: 120" in fake.completions.seen_user

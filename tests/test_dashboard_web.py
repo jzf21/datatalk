@@ -12,7 +12,7 @@ from datatalk.agent.dashboard import DashboardResult
 from datatalk.agent.executor import QueryResult
 
 
-def _fake_embed(texts):
+def _fake_embed(texts, ctx=None):
     return [np.array([0.01], dtype=np.float32).tolist() for _ in texts]
 
 

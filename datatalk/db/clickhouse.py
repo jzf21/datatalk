@@ -2,22 +2,22 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
 from typing import Any
 
 import clickhouse_connect
 from clickhouse_connect.driver.client import Client
 
-from datatalk.config import Settings, get_settings
+from datatalk.config import Settings
 
 
-def create_client(settings: Settings | None = None) -> Client:
+def create_client(settings: Settings) -> Client:
     """Create a new ClickHouse client from settings.
 
-    The caller owns the returned client and should close it when done, or use
-    :func:`get_client` for a cached shared instance.
+    The caller owns the returned client. Prefer
+    :func:`datatalk.clients.clickhouse_for`, which caches one client per
+    connection fingerprint; use this directly only for throwaway clients (e.g.
+    testing a candidate connection) that must not enter the registry.
     """
-    settings = settings or get_settings()
     return clickhouse_connect.get_client(
         host=settings.clickhouse_host,
         port=settings.clickhouse_port,
@@ -26,22 +26,20 @@ def create_client(settings: Settings | None = None) -> Client:
         database=settings.clickhouse_database,
         secure=settings.clickhouse_secure,
         query_limit=0,  # we enforce our own limits in the executor
+        # Without this the driver pins a server-side session id per client, and
+        # ClickHouse serializes concurrent queries on one session
+        # (SESSION_IS_LOCKED). Agents run in parallel worker threads sharing a
+        # cached client, so concurrent queries are the normal case.
+        autogenerate_session_id=False,
     )
 
 
-@lru_cache(maxsize=1)
-def get_client() -> Client:
-    """Return a cached, shared ClickHouse client."""
-    return create_client()
-
-
-def ping(client: Client | None = None) -> dict[str, Any]:
+def ping(client: Client) -> dict[str, Any]:
     """Verify connectivity and return basic server info.
 
     Raises whatever the driver raises on failure; callers should catch and
     present it to the user (this is used by the connection-checkout flow).
     """
-    client = client or get_client()
     version = client.command("SELECT version()")
     current_db = client.command("SELECT currentDatabase()")
     return {"version": str(version), "database": str(current_db)}

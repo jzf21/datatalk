@@ -1,46 +1,16 @@
 """Dashboard pipeline test with a scripted fake OpenAI client (no live DB/API)."""
 
 import json
-from types import SimpleNamespace
 
-import datatalk.agent.analyst as analyst_mod
 import datatalk.agent.dashboard as dashboard_mod
-import datatalk.agent.planner as planner_mod
-import datatalk.agent.reporter as reporter_mod  # noqa: F401 (parity with report test wiring)
 import datatalk.agent.sqlloop as sqlloop_mod
 from datatalk.agent.blocks import Row, Stat
 from datatalk.agent.executor import QueryResult
+from tests.conftest import FakeOpenAI, make_ctx
+from tests.conftest import fn_call as _fn_call
+from tests.conftest import message as _message
+from tests.conftest import response as _response
 
-
-def _fn_call(call_id, sql):
-    return SimpleNamespace(
-        id=call_id,
-        function=SimpleNamespace(name="run_sql", arguments=json.dumps({"sql": sql})),
-    )
-
-
-def _message(content=None, tool_calls=None):
-    return SimpleNamespace(content=content, tool_calls=tool_calls)
-
-
-def _response(message):
-    return SimpleNamespace(choices=[SimpleNamespace(message=message)])
-
-
-class FakeCompletions:
-    def __init__(self, scripted):
-        self._scripted = list(scripted)
-        self.calls = 0
-
-    def create(self, **kwargs):
-        resp = self._scripted[self.calls]
-        self.calls += 1
-        return resp
-
-
-class FakeOpenAI:
-    def __init__(self, scripted):
-        self.chat = SimpleNamespace(completions=FakeCompletions(scripted))
 
 
 def test_generate_dashboard_materializes_grid(monkeypatch):
@@ -64,13 +34,10 @@ def test_generate_dashboard_materializes_grid(monkeypatch):
         _response(_message(content="Data gathering complete.")),                  # Analyst stop
         _response(_message(content=dash_json)),                                   # Dashboard author
     ]
-    fake = FakeOpenAI(scripted)
-    monkeypatch.setattr(planner_mod, "get_openai", lambda: fake)
-    monkeypatch.setattr(analyst_mod, "get_openai", lambda: fake)
-    monkeypatch.setattr(dashboard_mod, "get_openai", lambda: fake)
-    monkeypatch.setattr(dashboard_mod, "get_schema_context", lambda: "TABLE t")
+    ctx = make_ctx(openai=FakeOpenAI(scripted))
+    monkeypatch.setattr(dashboard_mod, "get_schema_context", lambda ctx, **kw: "TABLE t")
 
-    def fake_run_sql(sql, settings=None):
+    def fake_run_sql(sql, *, ctx=None):
         return QueryResult(columns=["metric", "current", "prior"],
                            rows=[["revenue", 120, 100]], row_count=1,
                            truncated=False, sql=sql)
@@ -79,7 +46,7 @@ def test_generate_dashboard_materializes_grid(monkeypatch):
 
     events = []
     result = dashboard_mod.generate_dashboard(
-        "revenue dashboard", on_event=lambda k, d: events.append((k, d)))
+        "revenue dashboard", ctx=ctx, on_event=lambda k, d: events.append((k, d)))
 
     row = next(b for b in result.document.blocks if isinstance(b, Row))
     stat = row.children[0]
@@ -101,12 +68,9 @@ def test_generate_dashboard_bad_reference_degrades(monkeypatch):
         _response(_message(content="Data gathering complete.")),  # no queries
         _response(_message(content=dash_json)),
     ]
-    fake = FakeOpenAI(scripted)
-    monkeypatch.setattr(planner_mod, "get_openai", lambda: fake)
-    monkeypatch.setattr(analyst_mod, "get_openai", lambda: fake)
-    monkeypatch.setattr(dashboard_mod, "get_openai", lambda: fake)
-    monkeypatch.setattr(dashboard_mod, "get_schema_context", lambda: "schema")
+    ctx = make_ctx(openai=FakeOpenAI(scripted))
+    monkeypatch.setattr(dashboard_mod, "get_schema_context", lambda ctx, **kw: "schema")
 
-    result = dashboard_mod.generate_dashboard("anything")
+    result = dashboard_mod.generate_dashboard("anything", ctx=ctx)
     assert isinstance(result.document.blocks[0], Paragraph)
     assert "unavailable" in result.document.blocks[0].text

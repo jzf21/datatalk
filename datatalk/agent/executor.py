@@ -14,11 +14,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from clickhouse_connect.driver.client import Client
-
-from datatalk.config import Settings, get_settings
-from datatalk.db.clickhouse import get_client
+if TYPE_CHECKING:  # avoid a circular import: context -> clients -> db.clickhouse
+    from datatalk.context import TenantContext
 
 # Statements the agent is allowed to run (must be the first keyword).
 _ALLOWED_LEADERS = {"SELECT", "WITH", "SHOW", "DESCRIBE", "DESC", "EXPLAIN"}
@@ -179,17 +178,13 @@ def ensure_limit(sql: str, default_limit: int) -> str:
     return f"{sql.rstrip().rstrip(';')}\nLIMIT {int(default_limit)}"
 
 
-def run_sql(
-    sql: str,
-    client: Client | None = None,
-    settings: Settings | None = None,
-) -> QueryResult:
-    """Validate, cap, and execute a read-only query.
+def run_sql(sql: str, *, ctx: "TenantContext") -> QueryResult:
+    """Validate, cap, and execute a read-only query against the org's ClickHouse.
 
     Raises :class:`UnsafeSQLError` if the statement is not read-only.
     """
-    settings = settings or get_settings()
-    client = client or get_client()
+    settings = ctx.settings
+    client = ctx.clickhouse
 
     safe_sql = validate_sql(sql)
     safe_sql = ensure_limit(safe_sql, settings.sql_default_limit)

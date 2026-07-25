@@ -13,16 +13,18 @@ during the Analyst loop, and ``report`` now carries the materialized Document.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from datatalk.agent import analyst as analyst_mod
 from datatalk.agent import planner as planner_mod
 from datatalk.agent import reporter as reporter_mod
 from datatalk.agent.blocks import Document, materialize
 from datatalk.agent.sqlloop import EventFn
-from datatalk.config import Settings, get_settings
 from datatalk.db.introspect import get_schema_context
 from datatalk.llm.prompts import MEMORY_BLOCK_TEMPLATE
+
+if TYPE_CHECKING:
+    from datatalk.context import TenantContext
 
 
 @dataclass
@@ -43,33 +45,35 @@ def build_memory_block(suggestions: list[str] | None) -> str:
 def generate_report(
     request: str,
     *,
+    ctx: "TenantContext",
     memory_suggestions: list[str] | None = None,
     on_event: EventFn | None = None,
     max_steps: int = 8,
-    settings: Settings | None = None,
 ) -> ReportResult:
     """Run the Planner → Analyst → Reporter pipeline and return a Document.
 
     ``on_event(kind, data)`` is called as work progresses with kinds:
     ``"status"``, ``"plan"``, ``"sql"``, ``"result"``, ``"error"``, ``"report"``.
+
+    Every LLM and ClickHouse call resolves through ``ctx``, so a run can only
+    reach the data of the org it was started for.
     """
-    settings = settings or get_settings()
 
     def emit(kind: str, data: dict[str, Any]) -> None:
         if on_event:
             on_event(kind, data)
 
     emit("status", {"message": "Loading schema…"})
-    schema_context = get_schema_context()
+    schema_context = get_schema_context(ctx)
     memory_block = build_memory_block(memory_suggestions)
 
     # 1. Planner
     emit("status", {"message": "Planning the report…"})
     sections = planner_mod.plan_report(
         request,
+        ctx=ctx,
         schema_context=schema_context,
         memory_block=memory_block,
-        settings=settings,
     )
     emit("plan", {"sections": [s.to_dict() for s in sections]})
 
@@ -78,18 +82,16 @@ def generate_report(
     loop = analyst_mod.gather_data(
         request,
         sections,
+        ctx=ctx,
         schema_context=schema_context,
         memory_block=memory_block,
         on_event=on_event,
         max_steps=max_steps,
-        settings=settings,
     )
 
     # 3. Reporter — authors a dataset-referencing Document (no numbers typed).
     emit("status", {"message": "Writing the report…"})
-    authoring = reporter_mod.write_report(
-        request, sections, loop.datasets, settings=settings
-    )
+    authoring = reporter_mod.write_report(request, sections, loop.datasets, ctx=ctx)
 
     # Materialize dataset references into concrete values.
     document = materialize(authoring, loop.datasets)

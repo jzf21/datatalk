@@ -6,46 +6,15 @@ the captured dataset values).
 """
 
 import json
-from types import SimpleNamespace
 
-import datatalk.agent.analyst as analyst_mod
-import datatalk.agent.planner as planner_mod
 import datatalk.agent.report as report_mod
-import datatalk.agent.reporter as reporter_mod
 import datatalk.agent.sqlloop as sqlloop_mod
 from datatalk.agent.blocks import Chart, Table
 from datatalk.agent.executor import QueryResult
-
-
-def _fn_call(call_id, sql):
-    return SimpleNamespace(
-        id=call_id,
-        function=SimpleNamespace(name="run_sql", arguments=json.dumps({"sql": sql})),
-    )
-
-
-def _message(content=None, tool_calls=None):
-    return SimpleNamespace(content=content, tool_calls=tool_calls)
-
-
-def _response(message):
-    return SimpleNamespace(choices=[SimpleNamespace(message=message)])
-
-
-class FakeCompletions:
-    def __init__(self, scripted):
-        self._scripted = list(scripted)
-        self.calls = 0
-
-    def create(self, **kwargs):
-        resp = self._scripted[self.calls]
-        self.calls += 1
-        return resp
-
-
-class FakeOpenAI:
-    def __init__(self, scripted):
-        self.chat = SimpleNamespace(completions=FakeCompletions(scripted))
+from tests.conftest import FakeOpenAI, make_ctx
+from tests.conftest import fn_call as _fn_call
+from tests.conftest import message as _message
+from tests.conftest import response as _response
 
 
 def test_pipeline_yields_materialized_document(monkeypatch):
@@ -83,16 +52,14 @@ def test_pipeline_yields_materialized_document(monkeypatch):
         _response(_message(content="Data gathering complete.")),  # Analyst step 2
         _response(_message(content=reporter_json)),  # Reporter
     ]
-    fake = FakeOpenAI(scripted)
-
-    monkeypatch.setattr(planner_mod, "get_openai", lambda: fake)
-    monkeypatch.setattr(analyst_mod, "get_openai", lambda: fake)
-    monkeypatch.setattr(reporter_mod, "get_openai", lambda: fake)
-    monkeypatch.setattr(report_mod, "get_schema_context", lambda: "TABLE jira.issues")
+    ctx = make_ctx(openai=FakeOpenAI(scripted))
+    monkeypatch.setattr(
+        report_mod, "get_schema_context", lambda ctx, **kw: "TABLE jira.issues"
+    )
 
     captured_rows = [["2026-01", 10], ["2026-02", 20]]
 
-    def fake_run_sql(sql, settings=None):
+    def fake_run_sql(sql, *, ctx=None):
         return QueryResult(
             columns=["month", "issues"],
             rows=[list(r) for r in captured_rows],
@@ -106,6 +73,7 @@ def test_pipeline_yields_materialized_document(monkeypatch):
     events = []
     result = report_mod.generate_report(
         "Monthly issue trends",
+        ctx=ctx,
         on_event=lambda kind, data: events.append((kind, data)),
     )
 
@@ -136,13 +104,10 @@ def test_bad_dataset_reference_degrades_not_raises(monkeypatch):
         _response(_message(content="Data gathering complete.")),  # Analyst runs no queries
         _response(_message(content=reporter_json)),
     ]
-    fake = FakeOpenAI(scripted)
-    monkeypatch.setattr(planner_mod, "get_openai", lambda: fake)
-    monkeypatch.setattr(analyst_mod, "get_openai", lambda: fake)
-    monkeypatch.setattr(reporter_mod, "get_openai", lambda: fake)
-    monkeypatch.setattr(report_mod, "get_schema_context", lambda: "schema")
+    ctx = make_ctx(openai=FakeOpenAI(scripted))
+    monkeypatch.setattr(report_mod, "get_schema_context", lambda ctx, **kw: "schema")
 
-    result = report_mod.generate_report("anything")
+    result = report_mod.generate_report("anything", ctx=ctx)
     # Degraded to a paragraph note rather than raising.
     from datatalk.agent.blocks import Paragraph
 

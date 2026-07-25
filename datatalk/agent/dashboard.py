@@ -13,7 +13,7 @@ the materialized Document.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from datatalk.agent import analyst as analyst_mod
 from datatalk.agent import planner as planner_mod
@@ -21,14 +21,15 @@ from datatalk.agent.blocks import Document, materialize, parse_json_object
 from datatalk.agent.planner import Section, plan_to_text
 from datatalk.agent.report import build_memory_block
 from datatalk.agent.sqlloop import EventFn, dataset_previews
-from datatalk.config import Settings, get_settings
 from datatalk.db.introspect import get_schema_context
-from datatalk.llm.client import get_openai
 from datatalk.llm.prompts import (
     DASHBOARD_BLOCK_SCHEMA_DOC,
     DASHBOARD_SYSTEM,
     _ANTI_FABRICATION,
 )
+
+if TYPE_CHECKING:
+    from datatalk.context import TenantContext
 
 
 @dataclass
@@ -44,11 +45,9 @@ def author_dashboard(
     sections: list[Section],
     datasets: dict,
     *,
-    settings: Settings | None = None,
+    ctx: "TenantContext",
 ) -> Document:
     """Return an *authoring* grid Document referencing the captured datasets."""
-    settings = settings or get_settings()
-    client = get_openai()
     system = DASHBOARD_SYSTEM.format(
         block_schema=DASHBOARD_BLOCK_SCHEMA_DOC, anti_fabrication=_ANTI_FABRICATION
     )
@@ -58,8 +57,8 @@ def author_dashboard(
         f"Captured datasets (reference these by dataset_id):\n"
         f"{dataset_previews(datasets)}"
     )
-    resp = client.chat.completions.create(
-        model=settings.openai_model,
+    resp = ctx.openai.chat.completions.create(
+        model=ctx.model,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -73,28 +72,27 @@ def author_dashboard(
 def generate_dashboard(
     request: str,
     *,
+    ctx: "TenantContext",
     memory_suggestions: list[str] | None = None,
     on_event: EventFn | None = None,
     max_steps: int = 8,
-    settings: Settings | None = None,
 ) -> DashboardResult:
     """Run Planner → Analyst → Dashboard-author and return a materialized grid."""
-    settings = settings or get_settings()
 
     def emit(kind: str, data: dict[str, Any]) -> None:
         if on_event:
             on_event(kind, data)
 
     emit("status", {"message": "Loading schema…"})
-    schema_context = get_schema_context()
+    schema_context = get_schema_context(ctx)
     memory_block = build_memory_block(memory_suggestions)
 
     emit("status", {"message": "Planning the dashboard…"})
     sections = planner_mod.plan_report(
         request,
+        ctx=ctx,
         schema_context=schema_context,
         memory_block=memory_block,
-        settings=settings,
     )
     emit("plan", {"sections": [s.to_dict() for s in sections]})
 
@@ -102,15 +100,15 @@ def generate_dashboard(
     loop = analyst_mod.gather_data(
         request,
         sections,
+        ctx=ctx,
         schema_context=schema_context,
         memory_block=memory_block,
         on_event=on_event,
         max_steps=max_steps,
-        settings=settings,
     )
 
     emit("status", {"message": "Building the dashboard…"})
-    authoring = author_dashboard(request, sections, loop.datasets, settings=settings)
+    authoring = author_dashboard(request, sections, loop.datasets, ctx=ctx)
 
     document = materialize(authoring, loop.datasets)
     emit("dashboard", {"document": document.to_dict()})

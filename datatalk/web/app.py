@@ -23,6 +23,7 @@ from datatalk.agent.dashboard import generate_dashboard
 from datatalk.agent.qa import answer_question
 from datatalk.agent.report import generate_report
 from datatalk.config import get_settings
+from datatalk.context import TenantContext
 from datatalk.db import clickhouse, introspect
 from datatalk.db.introspect import get_schema_context
 from datatalk.llm import client as llm_client
@@ -53,6 +54,17 @@ app.mount("/static", StaticFiles(directory=str(_STATIC)), name="static")
 def _store() -> MemoryStore:
     # A fresh connection per request keeps SQLite thread-safe under the pool.
     return MemoryStore()
+
+
+def _ctx() -> TenantContext:
+    """The tenant context for this request.
+
+    Still single-tenant: every request resolves to the environment's own
+    credentials. Auth replaces this with a Depends that resolves the logged-in
+    user's org. Threading it through now means that swap touches only this
+    function, not the twenty call sites below.
+    """
+    return TenantContext.from_env()
 
 
 # --- models ---
@@ -98,11 +110,12 @@ def index() -> FileResponse:
 
 @app.get("/api/health")
 def health() -> dict[str, Any]:
-    settings = get_settings()
+    ctx = _ctx()
+    settings = ctx.settings
     result: dict[str, Any] = {"clickhouse": {"ok": False}, "openai": {"ok": False}}
     try:
-        info = clickhouse.ping()
-        tables = introspect.introspect(with_samples=False)
+        info = clickhouse.ping(ctx.clickhouse)
+        tables = introspect.introspect(ctx.clickhouse, ctx.settings, with_samples=False)
         result["clickhouse"] = {
             "ok": True,
             "version": info["version"],
@@ -114,7 +127,7 @@ def health() -> dict[str, Any]:
 
     if settings.has_openai:
         try:
-            reply = llm_client.ping()
+            reply = llm_client.ping(ctx)
             result["openai"] = {"ok": True, "model": settings.openai_model, "reply": reply}
         except Exception as exc:  # noqa: BLE001
             result["openai"] = {"ok": False, "error": str(exc)}
@@ -126,7 +139,7 @@ def health() -> dict[str, Any]:
 @app.get("/api/schema")
 def schema(refresh: bool = False) -> dict[str, Any]:
     try:
-        context = introspect.get_schema_context(force_refresh=refresh)
+        context = introspect.get_schema_context(_ctx(), force_refresh=refresh)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=str(exc))
     return {"schema_context": context}
@@ -145,6 +158,10 @@ def report(req: ReportRequest) -> StreamingResponse:
         raise HTTPException(status_code=400, detail="Empty request.")
 
     store = _store()
+    # Bound here, on the request thread, and captured by the worker closure
+    # below. contextvars do NOT propagate into threading.Thread, so the tenant
+    # must be passed explicitly or the worker would resolve the wrong org.
+    ctx = _ctx()
     suggestions: list[str] = []
     if req.use_memory:
         try:
@@ -162,7 +179,10 @@ def report(req: ReportRequest) -> StreamingResponse:
         def worker() -> None:
             try:
                 holder["result"] = generate_report(
-                    req.request, memory_suggestions=suggestions, on_event=on_event
+                    req.request,
+                    ctx=ctx,
+                    memory_suggestions=suggestions,
+                    on_event=on_event,
                 )
             except Exception as exc:  # noqa: BLE001
                 holder["error"] = str(exc)
@@ -204,6 +224,7 @@ def dashboard(req: DashboardRequest) -> StreamingResponse:
         raise HTTPException(status_code=400, detail="Empty request.")
 
     store = _store()
+    ctx = _ctx()  # see the note in /api/report: explicit, never a contextvar
     suggestions: list[str] = []
     if req.use_memory:
         try:
@@ -221,7 +242,10 @@ def dashboard(req: DashboardRequest) -> StreamingResponse:
         def worker() -> None:
             try:
                 holder["result"] = generate_dashboard(
-                    req.request, memory_suggestions=suggestions, on_event=on_event
+                    req.request,
+                    ctx=ctx,
+                    memory_suggestions=suggestions,
+                    on_event=on_event,
                 )
             except Exception as exc:  # noqa: BLE001
                 holder["error"] = str(exc)
@@ -258,6 +282,7 @@ def dashboard(req: DashboardRequest) -> StreamingResponse:
 @app.post("/api/dashboards/{dashboard_id}/analyze")
 def analyze_dashboard_endpoint(dashboard_id: int, req: DashboardAnalyzeRequest) -> dict[str, Any]:
     store = _store()
+    ctx = _ctx()
     saved = store.get_dashboard(dashboard_id)
     if not saved:
         raise HTTPException(status_code=404, detail="Dashboard not found.")
@@ -267,7 +292,7 @@ def analyze_dashboard_endpoint(dashboard_id: int, req: DashboardAnalyzeRequest) 
     )
     try:
         analysis = analyze_dashboard(
-            saved.document, focus=req.focus, memory_suggestions=suggestions
+            saved.document, ctx=ctx, focus=req.focus, memory_suggestions=suggestions
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=str(exc))
@@ -310,6 +335,7 @@ def ask(report_id: int, req: AskRequest) -> StreamingResponse:
         raise HTTPException(status_code=400, detail="Empty question.")
 
     store = _store()
+    ctx = _ctx()  # see the note in /api/report: explicit, never a contextvar
     saved = store.get_report(report_id)
     if not saved:
         raise HTTPException(status_code=404, detail="Report not found.")
@@ -333,10 +359,14 @@ def ask(report_id: int, req: AskRequest) -> StreamingResponse:
             try:
                 holder["result"] = answer_question(
                     req.question,
+                    ctx=ctx,
                     report_document=saved.document,
                     prior_queries=saved.queries,
                     conversation=conversation,
-                    schema_context=get_schema_context(),
+                    # Kept inside the worker: introspection can take seconds and
+                    # hoisting it would delay the first NDJSON byte, hiding the
+                    # "Querying (step 1)…" status the user relies on.
+                    schema_context=get_schema_context(ctx),
                     on_event=on_event,
                 )
             except Exception as exc:  # noqa: BLE001
@@ -379,6 +409,7 @@ def ask(report_id: int, req: AskRequest) -> StreamingResponse:
 @app.post("/api/analyze")
 def analyze(req: AnalyzeRequest) -> dict[str, Any]:
     store = _store()
+    ctx = _ctx()
     if req.report_id is not None:
         saved = store.get_report(req.report_id)
         if not saved:
@@ -392,7 +423,11 @@ def analyze(req: AnalyzeRequest) -> dict[str, Any]:
     suggestions = store.retrieve_suggestion_texts(text[:2000], k=3) if req.use_memory else []
     try:
         analysis = analyze_report(
-            text, source=source, focus=req.focus, memory_suggestions=suggestions
+            text,
+            ctx=ctx,
+            source=source,
+            focus=req.focus,
+            memory_suggestions=suggestions,
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=str(exc))

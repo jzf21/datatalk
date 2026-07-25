@@ -8,7 +8,7 @@ from datatalk.agent.executor import QueryResult
 from datatalk.memory.store import MemoryStore
 
 
-def _fake_embed(texts):
+def _fake_embed(texts, ctx=None):
     return [np.array([0.01], dtype=np.float32).tolist() for _ in texts]
 
 

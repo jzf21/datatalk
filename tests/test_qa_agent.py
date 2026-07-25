@@ -1,43 +1,16 @@
 """Q&A agent test: runs run_sql and returns a materialized Document."""
 
 import json
-from types import SimpleNamespace
 
 import datatalk.agent.qa as qa_mod
 import datatalk.agent.sqlloop as sqlloop_mod
 from datatalk.agent.blocks import Document, Table
 from datatalk.agent.executor import QueryResult
+from tests.conftest import FakeOpenAI, make_ctx
+from tests.conftest import fn_call as _fn_call
+from tests.conftest import message as _message
+from tests.conftest import response as _response
 
-
-def _fn_call(call_id, sql):
-    return SimpleNamespace(
-        id=call_id,
-        function=SimpleNamespace(name="run_sql", arguments=json.dumps({"sql": sql})),
-    )
-
-
-def _message(content=None, tool_calls=None):
-    return SimpleNamespace(content=content, tool_calls=tool_calls)
-
-
-def _response(message):
-    return SimpleNamespace(choices=[SimpleNamespace(message=message)])
-
-
-class FakeCompletions:
-    def __init__(self, scripted):
-        self._scripted = list(scripted)
-        self.calls = 0
-
-    def create(self, **kwargs):
-        resp = self._scripted[self.calls]
-        self.calls += 1
-        return resp
-
-
-class FakeOpenAI:
-    def __init__(self, scripted):
-        self.chat = SimpleNamespace(completions=FakeCompletions(scripted))
 
 
 def test_qa_runs_sql_and_returns_document(monkeypatch):
@@ -53,10 +26,9 @@ def test_qa_runs_sql_and_returns_document(monkeypatch):
         _response(_message(tool_calls=[_fn_call("c1", "SELECT account, count() FROM jira.issues GROUP BY account")])),
         _response(_message(content=answer_json)),
     ]
-    fake = FakeOpenAI(scripted)
-    monkeypatch.setattr(qa_mod, "get_openai", lambda: fake)
+    ctx = make_ctx(openai=FakeOpenAI(scripted))
 
-    def fake_run_sql(sql, settings=None):
+    def fake_run_sql(sql, *, ctx=None):
         return QueryResult(
             columns=["account", "issues"],
             rows=[["acme", 5], ["globex", 9]],
@@ -70,6 +42,7 @@ def test_qa_runs_sql_and_returns_document(monkeypatch):
     events = []
     result = qa_mod.answer_question(
         "Break issues down by account",
+        ctx=ctx,
         report_document=Document(blocks=[]),
         prior_queries=[],
         conversation=[],
