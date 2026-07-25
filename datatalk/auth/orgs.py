@@ -66,8 +66,13 @@ def effective_settings(
 
     The env provides everything not org-specific (OpenAI credentials, guardrail
     ceilings); the org row overrides the ClickHouse target and, where set, the
-    introspection and SQL limits. Returns the env settings untouched when the
-    org has no connection yet.
+    introspection and SQL limits.
+
+    With no connection the env settings come back untouched, which keeps OpenAI
+    and the guardrails working -- but the resulting context is marked
+    ``has_connection=False`` by :func:`build_tenant_context`, so the env
+    ``CLICKHOUSE_*`` values are never actually dialled. See
+    :class:`datatalk.context.NoConnectionError`.
     """
     base = base or get_settings()
     if connection is None:
@@ -109,12 +114,13 @@ def build_tenant_context(
     role: str,
 ) -> TenantContext:
     """The one place a request-scoped TenantContext is constructed."""
-    settings = effective_settings(default_connection(db, org.id))
+    connection = default_connection(db, org.id)
     return TenantContext.from_settings(
-        settings,
+        effective_settings(connection),
         org_id=org.id,
         org_slug=org.slug,
         user_id=user.id if user else None,
         user_email=user.email if user else "",
         role=role,
+        has_connection=connection is not None,
     )

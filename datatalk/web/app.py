@@ -11,13 +11,11 @@ import logging
 import queue
 import threading
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from datatalk import clients
@@ -33,7 +31,14 @@ from datatalk.db.session import get_engine, session_scope
 from datatalk.llm import client as llm_client
 from datatalk.memory.store import MemoryStore
 from datatalk.web import routes_auth, routes_orgs
-from datatalk.web.deps import RequestContext, csrf_guard, get_current_user, get_request_ctx
+from datatalk.context import NoConnectionError
+from datatalk.web.deps import (
+    RequestContext,
+    csrf_guard,
+    get_current_user,
+    get_request_ctx,
+    require_connection,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -89,9 +94,16 @@ if _cors_origins:
         max_age=3600,
     )
 
-_STATIC = Path(__file__).parent / "static"
+@app.exception_handler(NoConnectionError)
+def _no_connection_handler(request: Request, exc: NoConnectionError) -> JSONResponse:
+    """Backstop for a connectionless org that got past ``require_connection``.
 
-app.mount("/static", StaticFiles(directory=str(_STATIC)), name="static")
+    The dependency covers the endpoints we know reach ClickHouse; this covers
+    the ones we forget. Same 409 + ``no_connection`` code either way, so the
+    frontend has one branch to write.
+    """
+    return JSONResponse(status_code=409, content={"detail": "no_connection"})
+
 
 # Every application endpoint hangs off this router, so authentication is
 # structural: a new route added here cannot forget its Depends.
@@ -132,17 +144,28 @@ class AskRequest(BaseModel):
     question: str
 
 
-# --- static ---
+# --- service descriptor ---
 
 @app.get("/")
-def index() -> FileResponse:
-    return FileResponse(_STATIC / "index.html")
+def index() -> dict[str, Any]:
+    """This process serves the API only.
+
+    The UI is the Next.js app in ``frontend/``, which runs on its own origin
+    (see DATATALK_CORS_ORIGINS). A stray bookmark lands here, so point it
+    somewhere useful rather than 404.
+    """
+    return {
+        "name": "DataTalk API",
+        "version": app.version,
+        "docs": "/docs",
+        "ui": get_settings().cors_origin_list[:1] or None,
+    }
 
 
 # --- health / schema (connection checkout) ---
 
 @api.get("/health")
-def health(rctx: RequestContext = Depends(get_request_ctx)) -> dict[str, Any]:
+def health(rctx: RequestContext = Depends(require_connection)) -> dict[str, Any]:
     ctx = rctx.tenant
     settings = ctx.settings
     result: dict[str, Any] = {"clickhouse": {"ok": False}, "openai": {"ok": False}}
@@ -170,7 +193,7 @@ def health(rctx: RequestContext = Depends(get_request_ctx)) -> dict[str, Any]:
 
 
 @api.get("/schema")
-def schema(refresh: bool = False, rctx: RequestContext = Depends(get_request_ctx)) -> dict[str, Any]:
+def schema(refresh: bool = False, rctx: RequestContext = Depends(require_connection)) -> dict[str, Any]:
     try:
         context = introspect.get_schema_context(rctx.tenant, force_refresh=refresh)
     except Exception as exc:  # noqa: BLE001
@@ -186,7 +209,7 @@ def _ndjson(kind: str, data: dict[str, Any]) -> str:
 
 
 @api.post("/report")
-def report(req: ReportRequest, rctx: RequestContext = Depends(get_request_ctx)) -> StreamingResponse:
+def report(req: ReportRequest, rctx: RequestContext = Depends(require_connection)) -> StreamingResponse:
     if not req.request.strip():
         raise HTTPException(status_code=400, detail="Empty request.")
 
@@ -261,7 +284,7 @@ def report(req: ReportRequest, rctx: RequestContext = Depends(get_request_ctx)) 
 # --- dashboards (streaming NDJSON) ---
 
 @api.post("/dashboard")
-def dashboard(req: DashboardRequest, rctx: RequestContext = Depends(get_request_ctx)) -> StreamingResponse:
+def dashboard(req: DashboardRequest, rctx: RequestContext = Depends(require_connection)) -> StreamingResponse:
     if not req.request.strip():
         raise HTTPException(status_code=400, detail="Empty request.")
 
@@ -332,7 +355,7 @@ def dashboard(req: DashboardRequest, rctx: RequestContext = Depends(get_request_
 
 @api.post("/dashboards/{dashboard_id}/analyze")
 def analyze_dashboard_endpoint(
-    dashboard_id: int, req: DashboardAnalyzeRequest, rctx: RequestContext = Depends(get_request_ctx)
+    dashboard_id: int, req: DashboardAnalyzeRequest, rctx: RequestContext = Depends(require_connection)
 ) -> dict[str, Any]:
     store = rctx.store
     ctx = rctx.tenant
@@ -383,7 +406,7 @@ def get_dashboard(dashboard_id: int, rctx: RequestContext = Depends(get_request_
 # --- Q&A about a report (streaming NDJSON) ---
 
 @api.post("/reports/{report_id}/ask")
-def ask(report_id: int, req: AskRequest, rctx: RequestContext = Depends(get_request_ctx)) -> StreamingResponse:
+def ask(report_id: int, req: AskRequest, rctx: RequestContext = Depends(require_connection)) -> StreamingResponse:
     if not req.question.strip():
         raise HTTPException(status_code=400, detail="Empty question.")
 
@@ -467,7 +490,7 @@ def ask(report_id: int, req: AskRequest, rctx: RequestContext = Depends(get_requ
 # --- analysis ---
 
 @api.post("/analyze")
-def analyze(req: AnalyzeRequest, rctx: RequestContext = Depends(get_request_ctx)) -> dict[str, Any]:
+def analyze(req: AnalyzeRequest, rctx: RequestContext = Depends(require_connection)) -> dict[str, Any]:
     store = rctx.store
     ctx = rctx.tenant
     if req.report_id is not None:

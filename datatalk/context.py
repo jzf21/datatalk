@@ -34,6 +34,25 @@ ENV_ORG_ID = UUID("00000000-0000-0000-0000-000000000000")
 ENV_USER_ID = UUID("00000000-0000-0000-0000-000000000001")
 
 
+class NoConnectionError(RuntimeError):
+    """Raised when an org reaches for ClickHouse before configuring a connection.
+
+    The env ``CLICKHOUSE_*`` values are the *deployment's* warehouse, not any
+    org's. Falling back to them for an org with no stored connection would serve
+    one tenant another's data, so the fallback does not exist: a context built
+    for a connectionless org carries ``has_connection=False`` and raises here
+    instead of connecting. :func:`datatalk.web.deps.require_connection` turns
+    this into a 409 up front; this is the backstop for any path that skips it.
+    """
+
+    def __init__(self, org_id: UUID | None = None) -> None:
+        super().__init__(
+            "This workspace has no ClickHouse connection configured. "
+            "Add one under Settings -> Connection."
+        )
+        self.org_id = org_id
+
+
 @dataclass(frozen=True)
 class TenantContext:
     """Immutable compute context for one org acting as one user.
@@ -53,6 +72,11 @@ class TenantContext:
     # the schema cache, so changing credentials invalidates both automatically.
     fingerprint: str
 
+    # False when the org has no stored ClickHouse connection. ``settings`` then
+    # still carries the env defaults (OpenAI, guardrails), but reaching for the
+    # warehouse raises rather than silently hitting the deployment's own.
+    has_connection: bool = True
+
     # Injection points for tests and the connection-test endpoint. Never set on
     # a context built from a real request.
     openai_override: OpenAI | None = None
@@ -68,6 +92,8 @@ class TenantContext:
     def clickhouse(self) -> Client:
         if self.clickhouse_override is not None:
             return self.clickhouse_override
+        if not self.has_connection:
+            raise NoConnectionError(self.org_id)
         return clients.clickhouse_for(self.settings, self.fingerprint)
 
     @property
@@ -90,6 +116,7 @@ class TenantContext:
         user_id: UUID | None = None,
         user_email: str = "",
         role: str = "owner",
+        has_connection: bool = True,
     ) -> "TenantContext":
         return cls(
             org_id=org_id,
@@ -99,6 +126,7 @@ class TenantContext:
             role=role,
             settings=settings,
             fingerprint=clients.fingerprint(settings),
+            has_connection=has_connection,
         )
 
     @classmethod

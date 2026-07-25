@@ -321,16 +321,59 @@ def api_client(db):
     web.app.dependency_overrides.clear()
 
 
-@pytest.fixture
-def auth_client(api_client):
-    """A client that has signed up, so it carries a live session cookie."""
+def signup(api_client, *, org_name="Test Org"):
+    """Sign up a fresh user+org on ``api_client`` and return the org id."""
     resp = api_client.post(
         "/api/auth/signup",
         json={
             "email": f"user-{uuid4().hex[:8]}@example.com",
             "password": TEST_PASSWORD,
-            "org_name": "Test Org",
+            "org_name": org_name,
         },
     )
     assert resp.status_code == 201, resp.text
+    from uuid import UUID
+
+    return UUID(api_client.get("/api/auth/me").json()["org"]["id"])
+
+
+def give_connection(db, org_id, *, host="clickhouse.test", database="default"):
+    """Attach a default ClickHouse connection so the org is fully configured."""
+    conn = models.OrgClickHouseConnection(
+        org_id=org_id,
+        host=host,
+        port=8443,
+        username="reader",
+        password="secret",
+        database=database,
+        secure=True,
+        is_default=True,
+    )
+    db.add(conn)
+    db.flush()
+    return conn
+
+
+@pytest.fixture
+def connectionless_client(api_client):
+    """Signed up, but with no ClickHouse connection -- the 409 counterparty.
+
+    This is a brand-new org's real state, so it is what the ``no_connection``
+    tests exercise.
+    """
+    api_client.org_id = signup(api_client)
+    return api_client
+
+
+@pytest.fixture
+def auth_client(api_client, db):
+    """A signed-up client whose org has a ClickHouse connection configured.
+
+    The connection matters: endpoints that reach the warehouse now 409 without
+    one, and these fixtures stand in for a normal, fully set-up org. Tests that
+    want the unconfigured case use ``connectionless_client``.
+    """
+    org_id = signup(api_client)
+    give_connection(db, org_id)
+    api_client.org_id = org_id
     return api_client

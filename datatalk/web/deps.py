@@ -152,20 +152,21 @@ def get_request_ctx(
     )
 
 
-def require_admin(ctx: TenantContext = Depends(get_tenant_ctx)) -> TenantContext:
-    if ctx.role not in {"owner", "admin"}:
-        raise HTTPException(status_code=403, detail="forbidden")
-    return ctx
-
-
 def require_connection(
     rctx: RequestContext = Depends(get_request_ctx),
 ) -> RequestContext:
     """For endpoints that actually need ClickHouse.
 
     409 rather than a 502 at query time, so the UI can open the settings panel
-    instead of showing a driver error.
+    instead of showing a driver error. Reads the flag the context already
+    resolved rather than re-querying; ``TenantContext.clickhouse`` raises
+    ``NoConnectionError`` regardless, so this is the friendly path, not the
+    enforcing one.
+
+    Deliberately not applied to the pure-Postgres endpoints (``/api/reports``,
+    ``/api/dashboards``, ``/api/suggestions``): a new org must be able to load
+    its empty library and reach the settings panel.
     """
-    if orgs_svc.default_connection(rctx.db, rctx.tenant.org_id) is None:
+    if not rctx.tenant.has_connection:
         raise HTTPException(status_code=409, detail="no_connection")
     return rctx
