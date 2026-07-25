@@ -1,0 +1,290 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-plex-sans);
+  --font-mono: var(--font-plex-mono);
+  --font-heading: var(--font-sans);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-chart-6: var(--chart-6);
+  --color-chart-7: var(--chart-7);
+  --color-chart-8: var(--chart-8);
+  --color-chart-grid: var(--chart-grid);
+  --color-chart-axis: var(--chart-axis);
+  --color-chart-deemph: var(--chart-deemph);
+  --color-ink-primary: var(--ink-primary);
+  --color-ink-secondary: var(--ink-secondary);
+  --color-ink-tertiary: var(--ink-tertiary);
+  --color-ink-disabled: var(--ink-disabled);
+  --color-border-soft: var(--border-soft);
+  --color-border-strong: var(--border-strong);
+  --color-link: var(--link);
+  --color-status-good: var(--status-good);
+  --color-status-good-text: var(--status-good-text);
+  --color-status-warning: var(--status-warning);
+  --color-status-serious: var(--status-serious);
+  --color-status-critical: var(--status-critical);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+:root {
+  /* Surfaces -- one warm hue family (~95 deg), lightness-only steps.
+     L0 page 96.98% -> L1 card 99.05% -> L2 overlay 100%. */
+  --background: oklch(0.9698 0.0054 95.1);        /* #F6F5F1 ledger cream */
+  --foreground: oklch(0.2138 0.0042 84.6);        /* #1A1917 warm ink     */
+  --card: oklch(0.9905 0.0026 106.4);             /* #FCFCFA paper        */
+  --card-foreground: oklch(0.2138 0.0042 84.6);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.2138 0.0042 84.6);
+  --muted: oklch(0.9485 0.0067 97.4);             /* #EFEEE9 inset        */
+  --muted-foreground: oklch(0.5198 0.0140 96.6);  /* #6B6960  5.36:1      */
+  --accent: oklch(0.9276 0.0137 93.0);            /* #EAE7DD hover/selected */
+  --accent-foreground: oklch(0.2138 0.0042 84.6);
+
+  /* Ink hierarchy -- four levels, all used. */
+  --ink-primary: oklch(0.2138 0.0042 84.6);       /* #1A1917 17.10:1 */
+  --ink-secondary: oklch(0.5198 0.0140 96.6);     /* #6B6960  5.36:1 */
+  --ink-tertiary: oklch(0.4903 0.0150 94.0);      /* #767368  4.62:1 */
+  --ink-disabled: oklch(0.6227 0.0165 94.3);      /* #8A877C  3.50:1 -- non-text only */
+
+  /* Borders -- a progression, not one value. */
+  --border: oklch(0.9121 0.0110 95.2);            /* #E4E2DA standard hairline */
+  --border-soft: oklch(0.9182 0.0109 95.2);       /* #E6E4DC gridlines/dividers */
+  --border-strong: oklch(0.8445 0.0154 94.2);     /* #CFCCC1 axis / emphasis    */
+  --input: oklch(0.8726 0.0140 93.0);             /* #D8D5CB control border     */
+
+  /* Action -- primary is INK, so no brand hue competes with a series hue. */
+  --primary: oklch(0.2477 0.0058 91.6);           /* #22211E */
+  --primary-foreground: oklch(0.9818 0.0054 95.1);/* #FAF9F5 15.28:1 */
+  --secondary: oklch(0.9485 0.0067 97.4);
+  --secondary-foreground: oklch(0.2138 0.0042 84.6);
+
+  /* The stamp blue -- links, focus, selection. Same family as --chart-1 but
+     deliberately darker, so it can never be mistaken for a series mark. */
+  --ring: oklch(0.4796 0.1416 256.1);             /* #1C5CAB 6.45:1 */
+  --link: oklch(0.4796 0.1416 256.1);
+
+  --destructive: oklch(0.5273 0.1700 25.2);       /* #B93434 5.67:1 */
+  --destructive-foreground: oklch(1 0 0);
+
+  /* Status -- fixed, never themed, never used as a series colour. */
+  --status-good: oklch(0.6210 0.2073 142.6);      /* #0CA30C mark */
+  --status-good-text: oklch(0.4330 0.1473 142.5); /* #006300 7.34:1 */
+  --status-warning: oklch(0.8110 0.1644 78.5);    /* #FAB219 mark; icon+label mandatory */
+  --status-serious: oklch(0.7172 0.1406 41.6);    /* #EC835A */
+  --status-critical: oklch(0.5748 0.1862 25.2);   /* #D03B3B 4.68:1 */
+
+  /* Chart chrome. */
+  --chart-surface: oklch(0.9905 0.0026 106.4);
+  --chart-grid: oklch(0.9182 0.0109 95.2);        /* #E6E4DC hairline, SOLID */
+  --chart-axis: oklch(0.8445 0.0154 94.2);        /* #CFCCC1 baseline */
+  --chart-deemph: oklch(0.6900 0.0150 94.0);      /* #A5A294 isolate-mode gray */
+
+  /* Categorical -- validated palette, fixed order, never cycled. A 9th hue is
+     never generated; past 6 series we switch to small multiples. */
+  --chart-1: #2a78d6;  /* blue    */
+  --chart-2: #eb6834;  /* orange  */
+  --chart-3: #1baf7a;  /* aqua    */
+  --chart-4: #eda100;  /* yellow  */
+  --chart-5: #e87ba4;  /* magenta */
+  --chart-6: #008300;  /* green   */
+  --chart-7: #4a3aa7;  /* violet  */
+  --chart-8: #e34948;  /* red     */
+
+  /* Things that float cast a shadow. In-flow surfaces never do. */
+  --shadow-overlay: 0 8px 24px -8px rgb(26 25 23 / 0.14), 0 1px 2px rgb(26 25 23 / 0.06);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+  --radius: 0.375rem;                             /* 6px cards */
+
+  --sidebar: oklch(0.9698 0.0054 95.1);           /* same plane as the canvas */
+  --sidebar-foreground: oklch(0.2138 0.0042 84.6);
+  --sidebar-primary: oklch(0.2477 0.0058 91.6);
+  --sidebar-primary-foreground: oklch(0.9818 0.0054 95.1);
+  --sidebar-accent: oklch(0.9276 0.0137 93.0);
+  --sidebar-accent-foreground: oklch(0.2138 0.0042 84.6);
+  --sidebar-border: oklch(0.9121 0.0110 95.2);
+  --sidebar-ring: oklch(0.4796 0.1416 256.1);
+}
+
+.dark {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.488 0.243 264.376);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.556 0 0);
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-size: 0.875rem;                 /* 14/1.45 UI default */
+    line-height: 1.45;
+  }
+  html {
+    @apply font-sans;
+  }
+
+  /* Focus is never removed, only replaced. --ring is 6.45:1 on both planes. */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background: color-mix(in oklch, var(--ring) 18%, transparent);
+  }
+}
+
+@layer components {
+  /* --- The document surface ---------------------------------------------
+     Prose is held to a 68ch measure; tables, charts and rows bleed to the
+     full container. The scientific-paper figure pattern. */
+  .doc {
+    container-type: inline-size;
+    container-name: doc;
+  }
+  .doc-measure {
+    max-width: 68ch;
+  }
+
+  /* --- The 12-column block grid -----------------------------------------
+     Container queries, not viewport media queries: the Sources rail opens
+     and closes and changes the available width, so viewport breakpoints
+     would lie about how much room a row actually has. */
+  .doc-row {
+    display: grid;
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+    gap: 1rem;
+    align-items: stretch;               /* a stat beside a chart shouldn't float */
+  }
+  .doc-row > * {
+    min-width: 0;                       /* or ResponsiveContainer never shrinks */
+    grid-column: span 12;               /* mobile: everything stacks */
+  }
+  @container doc (min-width: 640px) {
+    .doc-row > * {
+      grid-column: span var(--w-md, 12);
+    }
+  }
+  @container doc (min-width: 1024px) {
+    .doc-row > * {
+      grid-column: span var(--w, 12);
+    }
+  }
+
+  /* Small caps label: stat labels, table headers, rail date rules. */
+  .label-caps {
+    font-size: 0.6875rem;               /* 11px */
+    line-height: 1.2;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+
+  /* Anything traceable is set in mono -- dataset ids, columns, row counts, SQL. */
+  .cite {
+    font-family: var(--font-mono), ui-monospace, monospace;
+    font-size: 0.78125rem;              /* 12.5px */
+    line-height: 1.5;
+  }
+
+  /* Barely-perceptible sweep: a 4% lightness delta over 1.6s. */
+  .shimmer {
+    background-image: linear-gradient(
+      90deg,
+      var(--muted) 0%,
+      color-mix(in oklch, var(--muted) 92%, white) 50%,
+      var(--muted) 100%
+    );
+    background-size: 200% 100%;
+    animation: dt-shimmer 1.6s linear infinite;
+  }
+  @keyframes dt-shimmer {
+    to { background-position: -200% 0; }
+  }
+}
+
+/* Motion is a courtesy, never a requirement. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 80ms !important;
+    scroll-behavior: auto !important;
+  }
+  .shimmer {
+    background-image: none;
+    background-color: var(--muted);
+  }
+}
