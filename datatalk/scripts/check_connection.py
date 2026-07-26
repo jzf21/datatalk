@@ -1,60 +1,62 @@
 """Connection checkout (Milestone 1).
 
-Run this first, against your real ClickHouse:
+Run this first, against the deployment's own warehouse:
 
     python -m datatalk.scripts.check_connection
     # or, after `pip install -e .`
     datatalk-check
 
 It verifies:
-  1. ClickHouse connectivity + server version.
-  2. Schema discovery (databases, tables, columns, sample rows).
+  1. Warehouse connectivity + server version, for every source in the context.
+  2. Schema discovery (namespaces, tables, columns, sample rows).
   3. OpenAI API key + model with one tiny test call.
 
-Nothing is written anywhere; this is a read-only smoke test.
+Nothing is written anywhere; this is a read-only smoke test. It checks the
+environment's ``CLICKHOUSE_*`` credentials, which are the deployment's own --
+an org's sources live in Postgres and are checked from the settings UI.
 """
 
 from __future__ import annotations
 
 import sys
 
-from datatalk.context import TenantContext
+from datatalk.context import SourceRef, TenantContext
+from datatalk.warehouse import catalog
 
 
 def _print_header(title: str) -> None:
     print(f"\n=== {title} ===")
 
 
-def check_clickhouse(ctx: TenantContext) -> bool:
-    from datatalk.db import clickhouse, introspect
-
-    _print_header("ClickHouse")
-    settings = ctx.settings
+def check_source(ctx: TenantContext, ref: SourceRef) -> bool:
+    _print_header(f"Source {ref.name} [{ref.type}]")
+    spec = ref.spec
     print(
-        f"Connecting to {settings.clickhouse_host}:{settings.clickhouse_port} "
-        f"(db={settings.clickhouse_database}, secure={settings.clickhouse_secure})"
+        f"Connecting to {spec.host}:{spec.port} "
+        f"(db={spec.database}, secure={spec.secure})"
     )
     try:
-        info = clickhouse.ping(ctx.clickhouse)
+        warehouse = ctx.warehouse(ref.name)
+        info = warehouse.ping()
     except Exception as exc:  # noqa: BLE001 - surface any driver error
         print(f"  FAILED: {exc}")
         return False
 
     print(f"  OK — server version {info['version']}, current db {info['database']}")
 
-    _print_header("Schema discovery")
+    _print_header(f"Schema discovery ({ref.name})")
     try:
-        tables = introspect.introspect(ctx.clickhouse, ctx.settings, with_samples=True)
+        tables = warehouse.introspect(with_samples=True)
     except Exception as exc:  # noqa: BLE001
         print(f"  FAILED to introspect: {exc}")
         return False
 
     if not tables:
-        print("  WARNING: no user tables found (only system databases).")
+        print("  WARNING: no user tables found (only system namespaces).")
         return True
 
     print(f"  Found {len(tables)} table(s):")
-    print(introspect.schema_summary(tables))
+    print(catalog.schema_summary(tables))
 
     # Show a fuller preview of the first table so the user can eyeball it.
     first = tables[0]
@@ -91,14 +93,15 @@ def main() -> int:
     # A single-tenant context straight from .env: this script predates orgs and
     # checks the environment's own credentials.
     ctx = TenantContext.from_env()
-    ch_ok = check_clickhouse(ctx)
+    results = {ref.name: check_source(ctx, ref) for ref in ctx.sources}
     oa_ok = check_openai(ctx)
 
     _print_header("Summary")
-    print(f"  ClickHouse: {'OK' if ch_ok else 'FAILED'}")
+    for name, ok in results.items():
+        print(f"  Source {name}: {'OK' if ok else 'FAILED'}")
     print(f"  OpenAI:     {'OK' if oa_ok else 'FAILED/SKIPPED'}")
 
-    return 0 if (ch_ok and oa_ok) else 1
+    return 0 if (all(results.values()) and oa_ok) else 1
 
 
 if __name__ == "__main__":

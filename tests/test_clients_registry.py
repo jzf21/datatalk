@@ -1,4 +1,4 @@
-"""Per-org client registry: keying, invalidation, and concurrent creation."""
+"""Per-source warehouse registry: keying, invalidation, and concurrent creation."""
 
 from __future__ import annotations
 
@@ -6,9 +6,10 @@ import threading
 
 import pytest
 
-from datatalk import clients
+from datatalk import clients, warehouse
 from datatalk.config import Settings
-from datatalk.context import TenantContext
+from datatalk.context import SourceRef, TenantContext
+from datatalk.warehouse import WarehouseSpec
 
 
 @pytest.fixture(autouse=True)
@@ -18,56 +19,77 @@ def _clear_registries():
     clients.close_all()
 
 
+def _spec(**over) -> WarehouseSpec:
+    base = dict(
+        type="clickhouse",
+        host="ch.example",
+        port=8123,
+        username="reader",
+        password="pw",
+        database="analytics",
+        secure=False,
+    )
+    base.update(over)
+    return WarehouseSpec(**base)
+
+
 def _settings(**over) -> Settings:
-    base = {
-        "CLICKHOUSE_HOST": "ch.example",
-        "CLICKHOUSE_PORT": 8123,
-        "CLICKHOUSE_USER": "reader",
-        "CLICKHOUSE_PASSWORD": "pw",
-        "CLICKHOUSE_DATABASE": "analytics",
-        "CLICKHOUSE_SECURE": False,
-        "OPENAI_API_KEY": "sk-test",
-        "OPENAI_BASE_URL": "",
-    }
+    base = {"OPENAI_API_KEY": "sk-test", "OPENAI_BASE_URL": ""}
     base.update(over)
     return Settings(**base)
+
+
+def _ctx(*specs: tuple[str, WarehouseSpec], **kw) -> TenantContext:
+    return TenantContext.from_sources(
+        tuple(
+            SourceRef.from_spec(spec, name=name, is_default=(i == 0))
+            for i, (name, spec) in enumerate(specs)
+        ),
+        org_id=TenantContext.from_env().org_id,
+        settings=_settings(),
+        **kw,
+    )
 
 
 # --- fingerprinting ---
 
 
 def test_same_connection_settings_share_a_fingerprint():
-    assert clients.fingerprint(_settings()) == clients.fingerprint(_settings())
+    assert warehouse.fingerprint(_spec()) == warehouse.fingerprint(_spec())
 
 
 @pytest.mark.parametrize(
     "override",
     [
-        {"CLICKHOUSE_HOST": "other.example"},
-        {"CLICKHOUSE_PORT": 9000},
-        {"CLICKHOUSE_USER": "someone-else"},
-        {"CLICKHOUSE_PASSWORD": "rotated"},
-        {"CLICKHOUSE_DATABASE": "other_db"},
-        {"CLICKHOUSE_SECURE": True},
+        {"host": "other.example"},
+        {"port": 9000},
+        {"username": "someone-else"},
+        {"password": "rotated"},
+        {"database": "other_db"},
+        {"secure": True},
+        {"sslmode": "require"},
+        # Without this, a ClickHouse and a Postgres source on the same
+        # host:port would collide onto one cached client.
+        {"type": "postgres"},
     ],
 )
 def test_any_connection_change_changes_the_fingerprint(override):
-    assert clients.fingerprint(_settings()) != clients.fingerprint(_settings(**override))
+    assert warehouse.fingerprint(_spec()) != warehouse.fingerprint(_spec(**override))
 
 
 @pytest.mark.parametrize(
     "override",
     [
-        {"INTROSPECT_DATABASES": "sales"},
-        {"INTROSPECT_EXCLUDE_TABLE_PATTERNS": "backup"},
-        {"INTROSPECT_SAMPLE_ROWS": 10},
-        {"INTROSPECT_MAX_TABLES": 5},
+        {"introspect_databases": ("sales",)},
+        {"introspect_exclude_patterns": ("backup",)},
+        {"introspect_sample_rows": 10},
+        {"introspect_max_tables": 5},
     ],
 )
 def test_introspection_settings_are_in_the_fingerprint(override):
     """Two orgs with identical credentials but different allowlists must not
     share a schema cache entry, or one sees the other's excluded tables."""
-    assert clients.fingerprint(_settings()) != clients.fingerprint(_settings(**override))
+    assert warehouse.fingerprint(_spec()) != warehouse.fingerprint(_spec(**override))
 
 
 def test_openai_fingerprint_tracks_key_and_base_url():
@@ -84,25 +106,27 @@ def test_openai_fingerprint_tracks_key_and_base_url():
 # --- caching + invalidation ---
 
 
-def test_client_is_cached_per_fingerprint(monkeypatch):
+def test_warehouse_is_cached_per_fingerprint(monkeypatch):
     built = []
-    monkeypatch.setattr(clients, "create_client", lambda s: built.append(s) or object())
+    monkeypatch.setattr(
+        clients, "create_warehouse", lambda s: built.append(s) or object()
+    )
 
-    s = _settings()
-    first = clients.clickhouse_for(s)
-    second = clients.clickhouse_for(s)
+    spec = _spec()
+    first = clients.warehouse_for(spec)
+    second = clients.warehouse_for(spec)
 
     assert first is second
     assert len(built) == 1
 
 
-def test_different_orgs_get_different_clients(monkeypatch):
-    monkeypatch.setattr(clients, "create_client", lambda s: object())
+def test_different_sources_get_different_warehouses(monkeypatch):
+    monkeypatch.setattr(clients, "create_warehouse", lambda s: object())
 
-    org_a = clients.clickhouse_for(_settings(CLICKHOUSE_DATABASE="org_a"))
-    org_b = clients.clickhouse_for(_settings(CLICKHOUSE_DATABASE="org_b"))
+    a = clients.warehouse_for(_spec(database="org_a"))
+    b = clients.warehouse_for(_spec(database="org_b"))
 
-    assert org_a is not org_b
+    assert a is not b
 
 
 def test_invalidate_forces_a_rebuild_without_closing(monkeypatch):
@@ -116,29 +140,29 @@ def test_invalidate_forces_a_rebuild_without_closing(monkeypatch):
         def close(self):
             self.closed = True
 
-    monkeypatch.setattr(clients, "create_client", lambda s: FakeClient())
+    monkeypatch.setattr(clients, "create_warehouse", lambda s: FakeClient())
 
-    s = _settings()
-    fp = clients.fingerprint(s)
-    original = clients.clickhouse_for(s, fp)
+    spec = _spec()
+    fp = warehouse.fingerprint(spec)
+    original = clients.warehouse_for(spec, fp)
 
-    clients.invalidate_clickhouse(fp)
-    rebuilt = clients.clickhouse_for(s, fp)
+    clients.invalidate_warehouse(fp)
+    rebuilt = clients.warehouse_for(spec, fp)
 
     assert rebuilt is not original
     assert original.closed is False
 
 
-def test_invalidating_one_org_leaves_others_cached(monkeypatch):
-    monkeypatch.setattr(clients, "create_client", lambda s: object())
+def test_invalidating_one_source_leaves_others_cached(monkeypatch):
+    monkeypatch.setattr(clients, "create_warehouse", lambda s: object())
 
-    a, b = _settings(CLICKHOUSE_DATABASE="a"), _settings(CLICKHOUSE_DATABASE="b")
-    client_a, client_b = clients.clickhouse_for(a), clients.clickhouse_for(b)
+    a, b = _spec(database="a"), _spec(database="b")
+    wh_a, wh_b = clients.warehouse_for(a), clients.warehouse_for(b)
 
-    clients.invalidate_clickhouse(clients.fingerprint(a))
+    clients.invalidate_warehouse(warehouse.fingerprint(a))
 
-    assert clients.clickhouse_for(a) is not client_a
-    assert clients.clickhouse_for(b) is client_b
+    assert clients.warehouse_for(a) is not wh_a
+    assert clients.warehouse_for(b) is wh_b
 
 
 def test_close_all_closes_and_clears(monkeypatch):
@@ -149,33 +173,31 @@ def test_close_all_closes_and_clears(monkeypatch):
         def close(self):
             self.closed = True
 
-    monkeypatch.setattr(clients, "create_client", lambda s: FakeClient())
-    created = clients.clickhouse_for(_settings())
+    monkeypatch.setattr(clients, "create_warehouse", lambda s: FakeClient())
+    created = clients.warehouse_for(_spec())
 
     clients.close_all()
 
     assert created.closed is True
-    assert clients._CH == {}
+    assert clients._WH == {}
 
 
-def test_concurrent_first_use_yields_one_shared_client(monkeypatch):
+def test_concurrent_first_use_yields_one_shared_warehouse(monkeypatch):
     """N threads racing on a cold cache must all end up with the same object."""
     barrier = threading.Barrier(8)
 
-    def slow_create(settings):
+    def slow_create(spec):
         barrier.wait(timeout=5)  # force maximum overlap
         return object()
 
-    monkeypatch.setattr(clients, "create_client", slow_create)
+    monkeypatch.setattr(clients, "create_warehouse", slow_create)
 
-    s = _settings()
+    spec = _spec()
     results: list[object] = []
     lock = threading.Lock()
 
     def worker():
-        client = clients.clickhouse_for(s)
-        with lock:
-            results.append(client)
+        results.append(clients.warehouse_for(spec))
 
     threads = [threading.Thread(target=worker) for _ in range(8)]
     for t in threads:
@@ -184,41 +206,87 @@ def test_concurrent_first_use_yields_one_shared_client(monkeypatch):
         t.join(timeout=10)
 
     assert len(results) == 8
-    assert len(set(map(id, results))) == 1, "all threads must share one client"
+    assert len(set(map(id, results))) == 1, "all threads must share one warehouse"
 
 
 # --- TenantContext wiring ---
 
 
-def test_context_resolves_clients_through_the_registry(monkeypatch):
+def test_context_resolves_warehouses_through_the_registry(monkeypatch):
     sentinel = object()
-    monkeypatch.setattr(clients, "create_client", lambda s: sentinel)
+    monkeypatch.setattr(clients, "create_warehouse", lambda s: sentinel)
 
-    ctx = TenantContext.from_settings(_settings(), org_id=TenantContext.from_env().org_id)
+    ctx = _ctx(("main", _spec()))
 
-    assert ctx.clickhouse is sentinel
-    assert ctx.fingerprint == clients.fingerprint(ctx.settings)
+    assert ctx.warehouse() is sentinel
+    assert ctx.warehouse("main") is sentinel
+
+
+def test_each_source_resolves_to_its_own_warehouse(monkeypatch):
+    monkeypatch.setattr(clients, "create_warehouse", lambda s: object())
+
+    ctx = _ctx(
+        ("events", _spec(database="events")),
+        ("billing", _spec(type="postgres", port=5432, database="billing")),
+    )
+
+    assert ctx.warehouse("events") is not ctx.warehouse("billing")
+    # No argument means the default, which is the first source.
+    assert ctx.warehouse() is ctx.warehouse("events")
+
+
+def test_unknown_source_names_what_does_exist(monkeypatch):
+    """The message is fed back to the model, so it has to be actionable."""
+    from datatalk.context import UnknownSourceError
+
+    monkeypatch.setattr(clients, "create_warehouse", lambda s: object())
+    ctx = _ctx(("events", _spec()), ("billing", _spec(database="b")))
+
+    with pytest.raises(UnknownSourceError) as exc:
+        ctx.warehouse("warehouse_of_dreams")
+
+    assert "events" in str(exc.value) and "billing" in str(exc.value)
+
+
+def test_a_connectionless_org_cannot_reach_any_warehouse(monkeypatch):
+    """The env CLICKHOUSE_* values must be structurally unreachable here."""
+    from datatalk.context import NoConnectionError
+
+    def explode(_spec):
+        raise AssertionError("no source is configured; nothing may be dialled")
+
+    monkeypatch.setattr(clients, "create_warehouse", explode)
+    ctx = _ctx()
+
+    assert ctx.has_connection is False
+    with pytest.raises(NoConnectionError):
+        ctx.warehouse()
 
 
 def test_overrides_bypass_the_registry(monkeypatch):
-    def explode(_settings):
+    def explode(_spec):
         raise AssertionError("registry must not be consulted when overridden")
 
-    monkeypatch.setattr(clients, "create_client", explode)
+    monkeypatch.setattr(clients, "create_warehouse", explode)
 
-    fake_ch, fake_oa = object(), object()
-    ctx = TenantContext.for_test(clickhouse=fake_ch, openai=fake_oa, settings=_settings())
+    fake_wh, fake_oa = object(), object()
+    ctx = TenantContext.for_test(
+        warehouses={"main": fake_wh}, openai=fake_oa, settings=_settings()
+    )
 
-    assert ctx.clickhouse is fake_ch
+    assert ctx.warehouse("main") is fake_wh
     assert ctx.openai is fake_oa
 
 
-def test_with_settings_refingerprints():
-    ctx = TenantContext.for_test(settings=_settings())
-    moved = ctx.with_settings(_settings(CLICKHOUSE_DATABASE="elsewhere"))
+def test_the_context_fingerprint_covers_every_source():
+    """It keys the combined catalog, so adding or editing a source must move it."""
+    one = _ctx(("events", _spec()))
+    two = _ctx(("events", _spec()), ("billing", _spec(database="b")))
+    edited = _ctx(("events", _spec(password="rotated")))
 
-    assert moved.fingerprint != ctx.fingerprint
-    assert moved.org_id == ctx.org_id
+    assert one.fingerprint != two.fingerprint
+    assert one.fingerprint != edited.fingerprint
+    assert one.fingerprint == _ctx(("events", _spec())).fingerprint
 
 
 def test_context_is_frozen():

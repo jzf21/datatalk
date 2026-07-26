@@ -284,6 +284,29 @@ def test_existing_user_does_not_need_a_password(db, legacy):
     assert summary.created_user is False
 
 
+def test_reuses_an_account_signed_up_with_different_case(db, legacy):
+    """Signup stores the address as typed; uniqueness is on lower(email).
+
+    Matching the lowercased form exactly found nothing for "Owner@Example.com",
+    so the import tried to insert a second row and died on the functional unique
+    index instead of adopting the existing account.
+    """
+    existing = models.User(
+        email="Owner@Example.COM",
+        password_hash=passwords.hash_password("correct-horse-battery"),
+    )
+    db.add(existing)
+    db.flush()
+
+    summary = _import(db, legacy, owner_email="owner@example.com", owner_password=None)
+
+    assert summary.created_user is False
+    membership = db.execute(
+        select(models.Membership).where(models.Membership.user_id == existing.id)
+    ).scalar_one()
+    assert membership.role == "owner"
+
+
 def test_missing_user_without_a_password_is_refused(db, legacy):
     with pytest.raises(SystemExit, match="owner-password"):
         _import(db, legacy, owner_password=None)

@@ -26,11 +26,24 @@ from datatalk.db import models
 # --- scripted OpenAI double ---------------------------------------------------
 
 
-def fn_call(call_id: str, sql: str):
-    """A tool call asking to run ``sql``."""
+def fn_call(call_id: str, sql: str, source: str = "main"):
+    """A tool call asking to run ``sql`` against ``source``."""
     return SimpleNamespace(
         id=call_id,
-        function=SimpleNamespace(name="run_sql", arguments=json.dumps({"sql": sql})),
+        function=SimpleNamespace(
+            name="run_sql", arguments=json.dumps({"source": source, "sql": sql})
+        ),
+    )
+
+
+def describe_call(call_id: str, table: str, source: str = "main"):
+    """A tool call asking for one table's full detail."""
+    return SimpleNamespace(
+        id=call_id,
+        function=SimpleNamespace(
+            name="describe_source",
+            arguments=json.dumps({"source": source, "table": table}),
+        ),
     )
 
 
@@ -46,11 +59,20 @@ class FakeCompletions:
     def __init__(self, scripted):
         self._scripted = list(scripted)
         self.calls = 0
+        # Every create() kwargs dict, so a test can assert WHICH model a call
+        # used. Without this, an agent silently falling back to the wrong model
+        # is indistinguishable from one using the right one.
+        self.kwargs: list[dict] = []
 
     def create(self, **kwargs):
+        self.kwargs.append(kwargs)
         resp = self._scripted[self.calls]
         self.calls += 1
         return resp
+
+    @property
+    def models_used(self) -> list[str]:
+        return [k.get("model") for k in self.kwargs]
 
 
 class FakeEmbeddings:
@@ -77,6 +99,85 @@ class FakeOpenAI:
         self.embeddings = FakeEmbeddings()
 
 
+# --- warehouses ----------------------------------------------------------------
+
+
+class FakeWarehouse:
+    """A stand-in implementing the Warehouse protocol.
+
+    Records every statement it was asked to run, so a multi-source test can
+    assert not just *that* a query ran but *which warehouse* it reached -- the
+    thing that actually goes wrong when source routing breaks.
+    """
+
+    def __init__(
+        self,
+        *,
+        dialect=None,
+        tables=(),
+        columns=("n",),
+        rows=((1,),),
+        fail=None,
+        version="1.0-fake",
+        database="fake",
+    ):
+        from datatalk.warehouse.clickhouse import CLICKHOUSE_DIALECT
+
+        self.dialect = dialect or CLICKHOUSE_DIALECT
+        self.spec = None
+        self._tables = list(tables)
+        self._columns = list(columns)
+        self._rows = [list(r) for r in rows]
+        # An exception instance to raise from every call, for dead-source tests.
+        self.fail = fail
+        self.version = version
+        self.database = database
+        self.queries: list[str] = []
+        self.introspections = 0
+        self.closed = False
+
+    def _maybe_fail(self):
+        if self.fail is not None:
+            raise self.fail
+
+    def ping(self):
+        self._maybe_fail()
+        return {"version": self.version, "database": self.database}
+
+    def query(self, sql, *, timeout_s, max_rows):
+        from datatalk.warehouse.base import QueryResult
+
+        self._maybe_fail()
+        self.queries.append(sql)
+        rows = self._rows[:max_rows]
+        return QueryResult(
+            columns=list(self._columns),
+            rows=[list(r) for r in rows],
+            row_count=len(rows),
+            truncated=len(self._rows) > max_rows,
+            sql=sql,
+        )
+
+    def introspect(self, *, with_samples=True):
+        self._maybe_fail()
+        self.introspections += 1
+        return list(self._tables)
+
+    def close(self):
+        self.closed = True
+
+
+def fake_table(name, *, database="db", columns=("id", "value"), rows=None):
+    from datatalk.warehouse.base import Column, Table
+
+    return Table(
+        database=database,
+        name=name,
+        columns=[Column(name=c, type="String") for c in columns],
+        sample_rows=rows or [],
+    )
+
+
 # --- contexts -----------------------------------------------------------------
 
 
@@ -91,11 +192,19 @@ def make_settings(**overrides) -> Settings:
     return Settings(**base)
 
 
-def make_ctx(*, openai=None, clickhouse=None, settings=None, **kw) -> TenantContext:
-    """A tenant context wired to fakes -- the single agent-test injection point."""
+def make_ctx(*, openai=None, warehouses=None, settings=None, **kw) -> TenantContext:
+    """A tenant context wired to fakes -- the single agent-test injection point.
+
+    ``warehouses`` maps source name to a stand-in. It defaults to a single
+    source called "main", which is what a normally configured org looks like;
+    pass several keys to exercise multi-source routing, or ``{}`` for the
+    connectionless case.
+    """
+    if warehouses is None:
+        warehouses = {"main": FakeWarehouse()}
     return TenantContext.for_test(
         openai=openai if openai is not None else FakeOpenAI(),
-        clickhouse=clickhouse,
+        warehouses=warehouses,
         settings=settings or make_settings(),
         **kw,
     )
@@ -108,7 +217,7 @@ def fake_openai():
 
 @pytest.fixture
 def ctx(fake_openai) -> TenantContext:
-    """Default context with an embedding-capable fake OpenAI and no ClickHouse."""
+    """Default context: an embedding-capable fake OpenAI and one fake source."""
     return make_ctx(openai=fake_openai)
 
 
@@ -124,11 +233,11 @@ def _clear_client_registries():
 
 @pytest.fixture(autouse=True)
 def _clear_schema_cache():
-    from datatalk.db import introspect
+    from datatalk.warehouse import catalog
 
-    introspect._SCHEMA_CACHE.clear()
+    catalog._SCHEMA_CACHE.clear()
     yield
-    introspect._SCHEMA_CACHE.clear()
+    catalog._SCHEMA_CACHE.clear()
 
 
 # --- database -----------------------------------------------------------------
@@ -337,17 +446,43 @@ def signup(api_client, *, org_name="Test Org"):
     return UUID(api_client.get("/api/auth/me").json()["org"]["id"])
 
 
-def give_connection(db, org_id, *, host="clickhouse.test", database="default"):
-    """Attach a default ClickHouse connection so the org is fully configured."""
-    conn = models.OrgClickHouseConnection(
+def give_connection(
+    db,
+    org_id,
+    *,
+    name="default",
+    type="clickhouse",
+    host="clickhouse.test",
+    database="default",
+    is_default=True,
+    description="",
+):
+    """Attach a data source so the org is fully configured.
+
+    The host is deliberately unreachable: the endpoints these fixtures cover
+    never dial it, and a source that resolved would make the tests depend on a
+    live warehouse.
+    """
+    from datatalk.auth import orgs as orgs_svc
+
+    if is_default:
+        # One default per org is a partial unique index, so demote first.
+        for other in orgs_svc.list_connections(db, org_id):
+            if other.is_default:
+                other.is_default = False
+        db.flush()
+    conn = models.OrgWarehouseConnection(
         org_id=org_id,
+        name=name,
+        type=type,
+        description=description,
         host=host,
-        port=8443,
+        port=8443 if type == "clickhouse" else 5432,
         username="reader",
         password="secret",
         database=database,
         secure=True,
-        is_default=True,
+        is_default=is_default,
     )
     db.add(conn)
     db.flush()
@@ -356,7 +491,7 @@ def give_connection(db, org_id, *, host="clickhouse.test", database="default"):
 
 @pytest.fixture
 def connectionless_client(api_client):
-    """Signed up, but with no ClickHouse connection -- the 409 counterparty.
+    """Signed up, but with no data source -- the 409 counterparty.
 
     This is a brand-new org's real state, so it is what the ``no_connection``
     tests exercise.
@@ -367,11 +502,11 @@ def connectionless_client(api_client):
 
 @pytest.fixture
 def auth_client(api_client, db):
-    """A signed-up client whose org has a ClickHouse connection configured.
+    """A signed-up client whose org has one data source configured.
 
-    The connection matters: endpoints that reach the warehouse now 409 without
-    one, and these fixtures stand in for a normal, fully set-up org. Tests that
-    want the unconfigured case use ``connectionless_client``.
+    The source matters: endpoints that reach a warehouse 409 without one, and
+    this fixture stands in for a normal, fully set-up org. Tests that want the
+    unconfigured case use ``connectionless_client``.
     """
     org_id = signup(api_client)
     give_connection(db, org_id)

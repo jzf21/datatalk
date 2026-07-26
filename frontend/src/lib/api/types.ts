@@ -95,14 +95,20 @@ export interface CapturedQuery {
 
 // --- plain JSON endpoints --------------------------------------------------
 
+export interface SourceHealth {
+  name: string;
+  type: string;
+  is_default: boolean;
+  ok: boolean;
+  version?: string;
+  database?: string;
+  table_count?: number;
+  error?: string;
+}
+
 export interface HealthResponse {
-  clickhouse: {
-    ok: boolean;
-    version?: string;
-    database?: string;
-    table_count?: number;
-    error?: string;
-  };
+  /** One entry per configured data source; a dead one is a state, not an error. */
+  sources: SourceHealth[];
   openai: { ok: boolean; model?: string; reply?: string; error?: string };
 }
 

@@ -42,8 +42,8 @@ export function ConnectionNotice() {
       role="status"
       className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-border bg-accent/60 px-6 py-2 text-[12px] text-ink-secondary"
     >
-      <span className="text-ink-primary">No warehouse connected.</span>
-      <span>Reports and questions need a ClickHouse connection.</span>
+      <span className="text-ink-primary">No data source connected.</span>
+      <span>Reports and questions need at least one data source.</span>
       <Link
         href={SETTINGS_PATH}
         className="font-medium text-ink-primary underline underline-offset-2"

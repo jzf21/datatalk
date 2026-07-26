@@ -13,6 +13,9 @@ export const qk = {
   dashboards: ["dashboards"] as const,
   dashboard: (id: number) => ["dashboard", id] as const,
   suggestions: ["suggestions"] as const,
+  context: (orgId: string | null) => ["context", orgId] as const,
+  contextFile: (orgId: string | null, path: string) =>
+    ["context", orgId, path] as const,
 };
 
 export function useHealth() {

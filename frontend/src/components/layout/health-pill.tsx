@@ -33,7 +33,16 @@ export function HealthPill() {
   // send someone to check uvicorn for no reason.
   const unconfigured = error instanceof ApiError && error.status === 409;
 
-  const ch = isPending || isError ? "unknown" : data.clickhouse.ok ? "ok" : "bad";
+  const sources = isPending || isError ? [] : data.sources;
+  const healthy = sources.filter((s) => s.ok).length;
+  // One dot for the sources as a whole: all up, some up, or none. A workspace
+  // can have five warehouses and the pill still has to fit in the header.
+  const wh: "ok" | "bad" | "unknown" =
+    isPending || isError
+      ? "unknown"
+      : sources.length > 0 && healthy === sources.length
+        ? "ok"
+        : "bad";
   const oa = isPending || isError ? "unknown" : data.openai.ok ? "ok" : "bad";
 
   // Status is never colour alone -- the dots are decorative and the label
@@ -44,8 +53,10 @@ export function HealthPill() {
       ? "API unreachable"
       : isPending
         ? "Checking…"
-        : ch === "ok" && oa === "ok"
-          ? "Connected"
+        : wh === "ok" && oa === "ok"
+          ? sources.length > 1
+            ? `${sources.length} sources`
+            : "Connected"
           : "Degraded";
 
   return (
@@ -56,7 +67,7 @@ export function HealthPill() {
           className="flex items-center gap-2 rounded-[4px] px-1 py-1 text-[12px] text-ink-secondary hover:text-ink-primary"
         >
           <span className="flex gap-1">
-            <Dot state={ch} />
+            <Dot state={wh} />
             <Dot state={oa} />
           </span>
           {label}
@@ -65,20 +76,34 @@ export function HealthPill() {
 
       <HoverCardContent side="top" align="start" className="w-72 text-[13px]">
         <dl className="space-y-2">
-          <div>
-            <dt className="label-caps text-ink-secondary">ClickHouse</dt>
-            <dd className="cite text-ink-primary">
-              {unconfigured
-                ? "No connection configured"
-                : isError
-                ? "API unreachable"
-                : isPending
-                  ? "…"
-                  : data.clickhouse.ok
-                    ? `${data.clickhouse.database} · ${data.clickhouse.table_count} tables · v${data.clickhouse.version}`
-                    : data.clickhouse.error}
-            </dd>
-          </div>
+          {unconfigured || isError || isPending ? (
+            <div>
+              <dt className="label-caps text-ink-secondary">Data sources</dt>
+              <dd className="cite text-ink-primary">
+                {unconfigured
+                  ? "None configured"
+                  : isError
+                    ? "API unreachable"
+                    : "…"}
+              </dd>
+            </div>
+          ) : (
+            // One row per source: with several warehouses, "degraded" is
+            // useless unless it says which one is down.
+            data.sources.map((s) => (
+              <div key={s.name}>
+                <dt className="label-caps flex items-center gap-1.5 text-ink-secondary">
+                  <Dot state={s.ok ? "ok" : "bad"} />
+                  {s.name}
+                </dt>
+                <dd className="cite text-ink-primary">
+                  {s.ok
+                    ? `${s.database} · ${s.table_count} tables · v${s.version}`
+                    : s.error}
+                </dd>
+              </div>
+            ))
+          )}
           <div>
             <dt className="label-caps text-ink-secondary">OpenAI</dt>
             <dd className="cite text-ink-primary">

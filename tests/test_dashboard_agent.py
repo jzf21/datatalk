@@ -35,9 +35,9 @@ def test_generate_dashboard_materializes_grid(monkeypatch):
         _response(_message(content=dash_json)),                                   # Dashboard author
     ]
     ctx = make_ctx(openai=FakeOpenAI(scripted))
-    monkeypatch.setattr(dashboard_mod, "get_schema_context", lambda ctx, **kw: "TABLE t")
+    monkeypatch.setattr(dashboard_mod, "build_catalog", lambda ctx, **kw: "SOURCE main [clickhouse]\n  db.t (a, b)")
 
-    def fake_run_sql(sql, *, ctx=None):
+    def fake_run_sql(sql, *, ctx=None, source=None):
         return QueryResult(columns=["metric", "current", "prior"],
                            rows=[["revenue", 120, 100]], row_count=1,
                            truncated=False, sql=sql)
@@ -69,7 +69,7 @@ def test_generate_dashboard_bad_reference_degrades(monkeypatch):
         _response(_message(content=dash_json)),
     ]
     ctx = make_ctx(openai=FakeOpenAI(scripted))
-    monkeypatch.setattr(dashboard_mod, "get_schema_context", lambda ctx, **kw: "schema")
+    monkeypatch.setattr(dashboard_mod, "build_catalog", lambda ctx, **kw: "SOURCE main [clickhouse]")
 
     result = dashboard_mod.generate_dashboard("anything", ctx=ctx)
     assert isinstance(result.document.blocks[0], Paragraph)

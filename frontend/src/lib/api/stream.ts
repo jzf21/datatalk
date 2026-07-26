@@ -16,9 +16,9 @@ import type { RunEvent } from "./types";
  *   document, and a table may hold SQL_MAX_ROWS rows), so lines are buffered
  *   until a newline rather than assumed to fit in one chunk.
  */
-export async function* readNdjson(
+export async function* readNdjson<E = RunEvent>(
   body: ReadableStream<Uint8Array>,
-): AsyncGenerator<RunEvent> {
+): AsyncGenerator<E> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -34,24 +34,24 @@ export async function* readNdjson(
       while ((newline = buffer.indexOf("\n")) !== -1) {
         const line = buffer.slice(0, newline);
         buffer = buffer.slice(newline + 1);
-        const event = parseLine(line);
+        const event = parseLine<E>(line);
         if (event) yield event;
       }
     }
 
     buffer += decoder.decode(); // flush any partial multi-byte sequence
-    const tail = parseLine(buffer);
+    const tail = parseLine<E>(buffer);
     if (tail) yield tail;
   } finally {
     reader.releaseLock();
   }
 }
 
-function parseLine(line: string): RunEvent | null {
+function parseLine<E>(line: string): E | null {
   const trimmed = line.trim();
   if (!trimmed) return null;
   try {
-    return JSON.parse(trimmed) as RunEvent;
+    return JSON.parse(trimmed) as E;
   } catch {
     // A malformed line should not kill a run that is otherwise fine.
     return null;
@@ -64,12 +64,17 @@ function parseLine(line: string): RunEvent | null {
  * Validation failures (empty request, unknown report) come back as an ordinary
  * HTTP 4xx with a `{"detail": ...}` body *before* the stream starts, so they
  * are thrown as ApiError rather than surfacing as an in-stream `error` event.
+ *
+ * Generic in the event type: report/dashboard/Q&A runs share `RunEvent`, while
+ * context generation is a different protocol that happens to reuse the
+ * transport. Overloading one union with both would let a caller destructure a
+ * field that never arrives.
  */
-export async function* streamNdjson(
+export async function* streamNdjson<E = RunEvent>(
   path: string,
   body: unknown,
   signal?: AbortSignal,
-): AsyncGenerator<RunEvent> {
+): AsyncGenerator<E> {
   const res = await fetch(`${API_BASE}${path}`, {
     method: "POST",
     credentials: "include", // the session cookie; see client.ts
@@ -94,5 +99,5 @@ export async function* streamNdjson(
   }
   if (!res.body) throw new ApiError(res.status, "Response carried no body.");
 
-  yield* readNdjson(res.body);
+  yield* readNdjson<E>(res.body);
 }

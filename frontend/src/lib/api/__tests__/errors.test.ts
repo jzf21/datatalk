@@ -10,7 +10,7 @@ import {
 describe("apiErrorMessage", () => {
   it("translates the API's machine codes", () => {
     expect(apiErrorMessage("not_authenticated")).toMatch(/session has expired/i);
-    expect(apiErrorMessage("no_connection")).toMatch(/warehouse/i);
+    expect(apiErrorMessage("no_connection")).toMatch(/data source/i);
     expect(apiErrorMessage("no_org")).toMatch(/workspace/i);
     expect(apiErrorMessage("forbidden")).toMatch(/permission/i);
   });

@@ -1,7 +1,7 @@
 [project]
 name = "datatalk"
 version = "0.1.0"
-description = "Schema-agnostic LLM report generation and analysis over ClickHouse Jira data"
+description = "Schema-agnostic LLM report generation and analysis over ClickHouse and Postgres"
 requires-python = ">=3.11"
 dependencies = [
     "openai>=1.40",
@@ -15,7 +15,9 @@ dependencies = [
     "python-dotenv>=1.0",
     "sqlalchemy>=2.0",
     "alembic>=1.13",
-    "psycopg[binary]>=3.1",
+    # [pool] powers the per-source Postgres warehouse pools; a bare connection
+    # would serialize the parallel agent threads that share one warehouse.
+    "psycopg[binary,pool]>=3.1",
     "argon2-cffi>=23.1",
     "cryptography>=42",
 ]

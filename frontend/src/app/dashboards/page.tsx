@@ -40,11 +40,7 @@ export default function DashboardsPage() {
     <>
       <PageHeader
         title={idle ? "New dashboard" : state.request}
-        meta={
-          idle
-            ? "One request becomes a grid of KPIs, charts and tables."
-            : `${state.steps.length} queries`
-        }
+        meta={idle ? undefined : `${state.steps.length} queries`}
         actions={
           !idle ? (
             <Button variant="outline" size="sm" onClick={run.reset}>
@@ -56,12 +52,16 @@ export default function DashboardsPage() {
 
       <PageBody className="space-y-10">
         {idle && (
-          <Composer
-            placeholder="e.g. An operations dashboard for support: volume, SLA compliance, and the accounts at risk."
-            examples={EXAMPLES}
-            submitLabel="Generate"
-            onSubmit={generate}
-          />
+          <div className="py-8 sm:py-14">
+            <Composer
+              heading="Build a dashboard"
+              subheading="one request, a whole grid."
+              placeholder="e.g. An operations dashboard for support: volume, SLA compliance, and the accounts at risk."
+              examples={EXAMPLES}
+              submitLabel="Generate"
+              onSubmit={generate}
+            />
+          </div>
         )}
 
         {!idle && !state.document && (

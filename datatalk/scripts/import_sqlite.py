@@ -2,7 +2,7 @@
 
     datatalk-import-sqlite --sqlite datatalk.sqlite3 \\
         --org-name Acme --owner-email you@example.com --owner-password '...' \\
-        --bootstrap-clickhouse
+        --bootstrap-warehouse
 
 The old store had no notion of an org, so every row it holds belongs to exactly
 one tenant: the one named on the command line. This finds-or-creates that org
@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
 from dataclasses import dataclass, field
@@ -33,7 +34,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from datatalk.auth import passwords
@@ -68,7 +69,7 @@ class Summary:
             f"owner: {self.owner_email}" + (" (created)" if self.created_user else ""),
         ]
         if self.created_connection:
-            lines.append("clickhouse connection: created from the environment")
+            lines.append("data source: created from the environment")
         for name in _TABLES:
             c = self.tables.get(name)
             if c is None:
@@ -154,8 +155,12 @@ def find_or_create_owner(
     db: Session, *, email: str, password: str | None
 ) -> tuple[models.User, bool]:
     normalized = email.strip().lower()
+    # Match on lower(email), the way signup does and the way the ix_users_email_lower
+    # unique index enforces it. Signup stores the address as typed, so an exact
+    # match against the lowercased form missed "Owner@Example.com" entirely and
+    # then hit an IntegrityError trying to insert a duplicate.
     existing = db.execute(
-        select(models.User).where(models.User.email == normalized)
+        select(models.User).where(func.lower(models.User.email) == normalized)
     ).scalar_one_or_none()
     if existing is not None:
         return existing, False
@@ -187,24 +192,30 @@ def ensure_membership(db: Session, *, org_id: UUID, user_id: UUID) -> None:
 
 
 def bootstrap_connection(db: Session, *, org_id: UUID, user_id: UUID) -> bool:
-    """Create the org's ClickHouse connection from the current environment.
+    """Seed the org's first data source from the environment's ClickHouse.
+
+    The env ``CLICKHOUSE_*`` values are the deployment's own warehouse, and this
+    is one of the two places (with ``TenantContext.from_env``) allowed to read
+    them. Once seeded the org owns the source and can add others of either
+    engine from the settings UI.
 
     The password is encrypted by the column type on the way in; there is no path
     through this function that stores it in plaintext.
     """
     if db.execute(
-        select(models.OrgClickHouseConnection.id).where(
-            models.OrgClickHouseConnection.org_id == org_id
+        select(models.OrgWarehouseConnection.id).where(
+            models.OrgWarehouseConnection.org_id == org_id
         )
     ).first():
         return False
 
     s = get_settings()
     db.add(
-        models.OrgClickHouseConnection(
+        models.OrgWarehouseConnection(
             org_id=org_id,
             name="default",
             is_default=True,
+            type="clickhouse",
             host=s.clickhouse_host,
             port=s.clickhouse_port,
             username=s.clickhouse_user,
@@ -373,7 +384,7 @@ def run_import(
     org_slug: str,
     owner_email: str,
     owner_password: str | None,
-    bootstrap_clickhouse: bool = False,
+    bootstrap_warehouse: bool = False,
 ) -> Summary:
     """Import everything into one transaction. The caller commits or rolls back."""
     summary = Summary(org_slug=org_slug, owner_email=owner_email.strip().lower())
@@ -383,7 +394,7 @@ def run_import(
         db, email=owner_email, password=owner_password
     )
     ensure_membership(db, org_id=org.id, user_id=user.id)
-    if bootstrap_clickhouse:
+    if bootstrap_warehouse:
         summary.created_connection = bootstrap_connection(
             db, org_id=org.id, user_id=user.id
         )
@@ -424,9 +435,9 @@ def main(argv: list[str] | None = None) -> int:
         "--owner-password", help="required only when the user does not exist yet"
     )
     parser.add_argument(
-        "--bootstrap-clickhouse",
+        "--bootstrap-warehouse",
         action="store_true",
-        help="create the org's ClickHouse connection from the current environment",
+        help="seed the org's first data source from the environment's CLICKHOUSE_* values",
     )
     parser.add_argument(
         "--dry-run",
@@ -439,13 +450,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.url:
         from datatalk.db.session import reset_engine
 
+        # Settings reads DATABASE_URL from the environment, so the override has
+        # to land there before the cache is dropped. Without this the engine
+        # quietly kept using DATABASE_URL while the migration check ran against
+        # --url -- i.e. it verified one database and wrote to another.
+        os.environ["DATABASE_URL"] = args.url
         get_settings.cache_clear()
         reset_engine()
 
     engine = get_engine()
     _require_current_schema(engine, args.url)
 
-    if args.bootstrap_clickhouse:
+    if args.bootstrap_warehouse:
         # Fail before touching anything rather than at flush time, when the
         # error surfaces as an opaque encryption failure mid-import.
         from datatalk.security import crypto
@@ -462,7 +478,7 @@ def main(argv: list[str] | None = None) -> int:
             org_slug=args.org_slug or slugify(args.org_name),
             owner_email=args.owner_email,
             owner_password=args.owner_password,
-            bootstrap_clickhouse=args.bootstrap_clickhouse,
+            bootstrap_warehouse=args.bootstrap_warehouse,
         )
         if args.dry_run:
             session.rollback()

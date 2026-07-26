@@ -1,5 +1,10 @@
 """SQLAlchemy models: identity, per-org data sources, and org-scoped content.
 
+An org holds any number of named data sources (``OrgWarehouseConnection``),
+each a ClickHouse or Postgres warehouse. The agent sees all of them at once and
+picks per query, so nothing here records "the" connection for a report -- query
+provenance is recorded per captured dataset in ``reports.queries``.
+
 Two id conventions, deliberately mixed:
 
 * **Identity tables use UUIDs.** Org and user ids appear in URLs and cookies;
@@ -75,7 +80,7 @@ class Org(Base):
     memberships: Mapped[list["Membership"]] = relationship(
         back_populates="org", cascade="all, delete-orphan"
     )
-    connections: Mapped[list["OrgClickHouseConnection"]] = relationship(
+    connections: Mapped[list["OrgWarehouseConnection"]] = relationship(
         back_populates="org", cascade="all, delete-orphan"
     )
 
@@ -171,15 +176,21 @@ class AuthSession(Base):
 # --- per-org data source ------------------------------------------------------
 
 
-class OrgClickHouseConnection(Base):
-    """An org's ClickHouse credentials and introspection scope.
+class OrgWarehouseConnection(Base):
+    """One of an org's data sources: credentials, engine, and introspection scope.
 
     A separate table rather than columns on ``orgs``: one place for every
-    secret, one access path, and room for multiple named connections later
-    without a data migration.
+    secret, one access path, and room for the several named sources an org
+    actually has.
+
+    ``name`` is not cosmetic. It is the handle the LLM types in
+    ``run_sql(source=...)``, so it is unique per org and constrained to a plain
+    identifier by the API layer. ``description`` is likewise load-bearing: it
+    goes into the schema catalog and is the main signal the model uses to pick
+    the right source for a question.
     """
 
-    __tablename__ = "org_clickhouse_connections"
+    __tablename__ = "org_warehouse_connections"
 
     id: Mapped[UUID] = _uuid_pk()
     org_id: Mapped[UUID] = mapped_column(
@@ -187,6 +198,8 @@ class OrgClickHouseConnection(Base):
     )
     name: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'default'"))
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    type: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'clickhouse'"))
+    description: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
 
     host: Mapped[str] = mapped_column(Text, nullable=False)
     port: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("8123"))
@@ -195,8 +208,13 @@ class OrgClickHouseConnection(Base):
     password: Mapped[str | None] = mapped_column("password_encrypted", EncryptedStr)
     database: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'default'"))
     secure: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    # Postgres only: disable/allow/require/verify-ca/verify-full. NULL = driver
+    # default, or "require" when ``secure`` is set.
+    sslmode: Mapped[str | None] = mapped_column(Text)
 
-    # Per-org overrides of the INTROSPECT_*/SQL_* env globals. NULL = inherit.
+    # Per-source overrides of the INTROSPECT_*/SQL_* env globals. NULL = inherit.
+    # On ClickHouse ``introspect_databases`` is a database allowlist; on
+    # Postgres one connection sees one database, so it is a schema allowlist.
     introspect_databases: Mapped[list[str]] = mapped_column(
         ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
     )
@@ -220,10 +238,15 @@ class OrgClickHouseConnection(Base):
     org: Mapped[Org] = relationship(back_populates="connections")
 
     __table_args__ = (
-        UniqueConstraint("org_id", "name", name="ux_chconn_org_name"),
-        # Exactly one default per org, enforced by the database.
+        UniqueConstraint("org_id", "name", name="ux_whconn_org_name"),
+        # A CHECK rather than a native ENUM, for the reason given on
+        # ck_memberships_role above.
+        CheckConstraint(
+            "type IN ('clickhouse','postgres')", name="ck_whconn_type"
+        ),
+        # At most one default per org, enforced by the database.
         Index(
-            "ux_chconn_org_default",
+            "ux_whconn_org_default",
             "org_id",
             unique=True,
             postgresql_where=text("is_default"),
@@ -232,19 +255,25 @@ class OrgClickHouseConnection(Base):
 
     def __repr__(self) -> str:  # never render the password
         return (
-            f"<OrgClickHouseConnection org={self.org_id} name={self.name!r} "
-            f"host={self.host!r} db={self.database!r}>"
+            f"<OrgWarehouseConnection org={self.org_id} name={self.name!r} "
+            f"type={self.type!r} host={self.host!r} db={self.database!r}>"
         )
 
     def to_public_dict(self) -> dict[str, Any]:
         """Safe for API responses: reports whether a password exists, never it."""
         return {
+            "id": str(self.id),
+            "name": self.name,
+            "type": self.type,
+            "description": self.description or "",
+            "is_default": self.is_default,
             "configured": True,
             "host": self.host,
             "port": self.port,
             "user": self.username,
             "database": self.database,
             "secure": self.secure,
+            "sslmode": self.sslmode,
             "has_password": bool(self.password),
             "introspect_databases": list(self.introspect_databases or []),
             "introspect_exclude_patterns": list(self.introspect_exclude_patterns or []),
@@ -381,3 +410,124 @@ class Dashboard(Base):
             postgresql_where=text("legacy_id IS NOT NULL"),
         ),
     )
+
+
+# --- the context model --------------------------------------------------------
+#
+# Curated documentation of what an org's data *means*, as opposed to what it
+# contains. The catalog tells the agent that `orders.status` exists; only this
+# tells it that 'void' must be excluded from revenue. Summaries go into every
+# catalog-bearing prompt; bodies are fetched on demand via the `read_context`
+# tool. See datatalk/memory/datacontext.py.
+
+
+# A context path becomes a filename on git sync, so traversal and absolute paths
+# must be unrepresentable rather than merely rejected by a validator. Shared with
+# the migration and the request models so the three cannot drift.
+CONTEXT_PATH_RE = r"^(overview\.md|(ontology|playbooks)/[a-z0-9][a-z0-9_-]{0,62}\.md)$"
+
+CONTEXT_ORIGINS = ("agent", "human", "dbt", "github", "looker", "confluence", "tableau")
+
+
+class DataContextFile(Base):
+    """One markdown file in an org's context model.
+
+    A virtual filesystem, not a nested document: ``path`` is the identity, and
+    the table serializes losslessly to a directory of ``.md`` files (see
+    ``memory/datacontext.to_markdown``). That is what keeps a future git sync a
+    serializer rather than a schema change.
+
+    ``ontology/`` files are keyed by *business entity*, not by table -- one
+    entity may span several tables and even several sources -- so ``covers``
+    records the tables a file documents rather than the path encoding them.
+
+    Two deliberate departures from the content-table template above: no
+    ``legacy_id`` (``datatalk-import-sqlite`` predates this feature and will
+    never write a context file, so the column would be permanently dead), and
+    ``origin`` exists so a future dbt/GitHub importer can own a file that the
+    warehouse generator must not clobber.
+    """
+
+    __tablename__ = "data_context_files"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    org_id: Mapped[UUID] = _org_fk()
+    created_by_user_id: Mapped[UUID | None] = _author_fk()
+
+    # "overview.md" | "ontology/<slug>.md" | "playbooks/<slug>.md"
+    path: Mapped[str] = mapped_column(Text, nullable=False)
+    # The one line that goes into EVERY prompt. This is the always-on token
+    # budget, which is why it is a column and not parsed out of the body.
+    summary: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
+    body_md: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
+    # The last body the generator wrote -- the merge base. body_md differing from
+    # this is what "a human owns this file" means. NULL for a hand-created file.
+    generated_body_md: Mapped[str | None] = mapped_column(Text)
+
+    # [{"source": "main", "table": "analytics.orders"}] -- lets describe_source
+    # attach the covering ontology file with no extra round trip.
+    covers: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    # [{"source": ..., "sql": ..., "row_count": ...}] -- the profiling queries
+    # behind the claims, so "why does it say status can be 'void'" is answerable.
+    evidence: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    origin: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'agent'")
+    )
+
+    generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    edited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    edited_by_user_id: Mapped[UUID | None] = _author_fk()
+    created_at: Mapped[datetime] = _created_at()
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        # Leads with org_id, so it also serves the cache-fill query
+        # WHERE org_id = ? ORDER BY path. No separate index needed.
+        UniqueConstraint("org_id", "path", name="ux_dcfile_org_path"),
+        CheckConstraint(f"path ~ '{CONTEXT_PATH_RE}'", name="ck_dcfile_path"),
+        CheckConstraint(
+            "origin IN ('agent','human','dbt','github','looker','confluence','tableau')",
+            name="ck_dcfile_origin",
+        ),
+    )
+
+
+class DataContextDoc(Base):
+    """Last-run metadata for an org's context model. One row per org.
+
+    Separate from the files so a hand-written file can exist before any
+    generation run. No ``(org_id, id DESC)`` index: with one row per org the
+    unique constraint serves every read.
+    """
+
+    __tablename__ = "data_context_docs"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    org_id: Mapped[UUID] = _org_fk()
+    created_by_user_id: Mapped[UUID | None] = _author_fk()
+    # Which model wrote it -- worth knowing when the output disappoints.
+    model: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
+    generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # {"sources": [...], "tables_seen": 312, "tables_profiled": 64,
+    #  "entities": 9, "playbooks": 5, "queries": 41, "truncated": false}
+    stats: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    created_at: Mapped[datetime] = _created_at()
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (UniqueConstraint("org_id", name="ux_dcdoc_org"),)

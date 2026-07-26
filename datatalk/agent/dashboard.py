@@ -18,10 +18,11 @@ from typing import TYPE_CHECKING, Any
 from datatalk.agent import analyst as analyst_mod
 from datatalk.agent import planner as planner_mod
 from datatalk.agent.blocks import Document, materialize, parse_json_object
+from datatalk.agent.context_block import build_context_block
 from datatalk.agent.planner import Section, plan_to_text
 from datatalk.agent.report import build_memory_block
 from datatalk.agent.sqlloop import EventFn, dataset_previews
-from datatalk.db.introspect import get_schema_context
+from datatalk.warehouse.catalog import build_catalog
 from datatalk.llm.prompts import (
     DASHBOARD_BLOCK_SCHEMA_DOC,
     DASHBOARD_SYSTEM,
@@ -46,16 +47,19 @@ def author_dashboard(
     datasets: dict,
     *,
     ctx: "TenantContext",
+    sources: dict[str, str] | None = None,
 ) -> Document:
     """Return an *authoring* grid Document referencing the captured datasets."""
     system = DASHBOARD_SYSTEM.format(
-        block_schema=DASHBOARD_BLOCK_SCHEMA_DOC, anti_fabrication=_ANTI_FABRICATION
+        block_schema=DASHBOARD_BLOCK_SCHEMA_DOC,
+        anti_fabrication=_ANTI_FABRICATION,
+        context_block=build_context_block(ctx),
     )
     user = (
         f"User request:\n{request}\n\n"
         f"Plan:\n{plan_to_text(sections)}\n\n"
         f"Captured datasets (reference these by dataset_id):\n"
-        f"{dataset_previews(datasets)}"
+        f"{dataset_previews(datasets, sources=sources)}"
     )
     resp = ctx.openai.chat.completions.create(
         model=ctx.model,
@@ -84,7 +88,7 @@ def generate_dashboard(
             on_event(kind, data)
 
     emit("status", {"message": "Loading schema…"})
-    schema_context = get_schema_context(ctx)
+    schema_context = build_catalog(ctx)
     memory_block = build_memory_block(memory_suggestions)
 
     emit("status", {"message": "Planning the dashboard…"})
@@ -108,7 +112,9 @@ def generate_dashboard(
     )
 
     emit("status", {"message": "Building the dashboard…"})
-    authoring = author_dashboard(request, sections, loop.datasets, ctx=ctx)
+    authoring = author_dashboard(
+        request, sections, loop.datasets, ctx=ctx, sources=loop.dataset_sources
+    )
 
     document = materialize(authoring, loop.datasets)
     emit("dashboard", {"document": document.to_dict()})

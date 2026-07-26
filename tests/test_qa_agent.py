@@ -28,7 +28,7 @@ def test_qa_runs_sql_and_returns_document(monkeypatch):
     ]
     ctx = make_ctx(openai=FakeOpenAI(scripted))
 
-    def fake_run_sql(sql, *, ctx=None):
+    def fake_run_sql(sql, *, ctx=None, source=None):
         return QueryResult(
             columns=["account", "issues"],
             rows=[["acme", 5], ["globex", 9]],

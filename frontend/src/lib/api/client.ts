@@ -32,12 +32,20 @@ const DETAIL_MESSAGES: Record<string, string> = {
   not_authenticated: "Your session has expired. Please sign in again.",
   no_org: "You're not a member of any workspace yet. Ask an admin to invite you.",
   forbidden: "You don't have permission to do that.",
-  no_connection: "This workspace isn't connected to a warehouse yet.",
+  no_connection: "This workspace has no data source connected yet.",
   cross_origin_request: "That request was blocked as cross-origin.",
   invalid_credentials: "That email and password don't match.",
   too_many_attempts: "Too many failed attempts. Try again in 15 minutes.",
   email_taken: "An account with that email already exists.",
   signup_disabled: "Signup is disabled on this server.",
+  duplicate_source_name: "A data source with that name already exists.",
+  connection_not_found: "That data source no longer exists.",
+  context_file_not_found: "That context file no longer exists.",
+  context_file_exists: "A context file with that path already exists.",
+  context_file_limit: "This workspace has reached its context file limit.",
+  context_exists:
+    "Regenerating from scratch would discard the current context. Confirm to continue.",
+  context_generating: "Context is already being generated for this workspace.",
 };
 
 export function apiErrorMessage(detail: string): string {

@@ -1,4 +1,11 @@
-import { ApiError, apiErrorMessage, apiGet, apiPost, apiPut } from "./client";
+import {
+  ApiError,
+  apiDelete,
+  apiErrorMessage,
+  apiGet,
+  apiPost,
+  apiPut,
+} from "./client";
 
 export interface AuthUser {
   id: string;
@@ -25,7 +32,11 @@ export type MeResponse =
       user: AuthUser;
       org: AuthOrg | null;
       orgs: AuthOrg[];
-      connection: { configured: boolean };
+      connection: {
+        configured: boolean;
+        count: number;
+        sources: { name: string; type: WarehouseType }[];
+      };
     };
 
 export const getMe = (signal?: AbortSignal) =>
@@ -69,9 +80,29 @@ export async function switchOrgAndReload(orgId: string): Promise<void> {
   window.location.assign("/reports");
 }
 
-// --- per-org ClickHouse connection ------------------------------------------
+// --- per-org data sources ----------------------------------------------------
+
+export type WarehouseType = "clickhouse" | "postgres";
+
+export type SslMode =
+  | "disable"
+  | "allow"
+  | "prefer"
+  | "require"
+  | "verify-ca"
+  | "verify-full";
 
 export interface ConnectionInput {
+  type: WarehouseType;
+  /**
+   * The handle the agent types in `run_sql(source: ...)`, so the API constrains
+   * it to `^[a-z][a-z0-9_]{0,39}$`.
+   */
+  name: string;
+  /** Free text; goes into the schema catalog and is how the agent routes a
+   * question to the right source. */
+  description: string;
+  is_default: boolean;
   host: string;
   port: number;
   user: string;
@@ -79,22 +110,39 @@ export interface ConnectionInput {
   password?: string | null;
   database: string;
   secure: boolean;
+  /** Postgres only. */
+  sslmode?: SslMode | null;
 }
 
 export interface ConnectionPublic extends Omit<ConnectionInput, "password"> {
+  id: string;
+  has_password: boolean;
   configured?: boolean;
   [key: string]: unknown;
 }
 
-export const getConnection = (orgId: string) =>
-  apiGet<ConnectionPublic>(`/api/orgs/${orgId}/connection`);
+export const listConnections = (orgId: string) =>
+  apiGet<{ connections: ConnectionPublic[] }>(`/api/orgs/${orgId}/connections`);
 
-export const putConnection = (orgId: string, input: ConnectionInput) =>
-  apiPut<ConnectionPublic>(`/api/orgs/${orgId}/connection`, input);
+export const createConnection = (orgId: string, input: ConnectionInput) =>
+  apiPost<ConnectionPublic>(`/api/orgs/${orgId}/connections`, input);
+
+export const updateConnection = (
+  orgId: string,
+  connectionId: string,
+  input: ConnectionInput,
+) =>
+  apiPut<ConnectionPublic>(
+    `/api/orgs/${orgId}/connections/${connectionId}`,
+    input,
+  );
+
+export const deleteConnection = (orgId: string, connectionId: string) =>
+  apiDelete<void>(`/api/orgs/${orgId}/connections/${connectionId}`);
 
 export const testConnection = (orgId: string, input: ConnectionInput) =>
   apiPost<{ ok: boolean; error?: string; [key: string]: unknown }>(
-    `/api/orgs/${orgId}/connection/test`,
+    `/api/orgs/${orgId}/connections/test`,
     input,
   );
 
@@ -113,9 +161,9 @@ export function isUnauthorized(err: unknown): boolean {
 export const authErrorMessage = apiErrorMessage;
 
 /**
- * The backend answers 409 `no_connection` (not a 502) when an org has no
- * ClickHouse connection configured, precisely so the UI can open the settings
- * panel instead of surfacing a driver error. This recognises it wherever it
+ * The backend answers 409 `no_connection` (not a 502) when an org has no data
+ * source configured at all, precisely so the UI can open the settings panel
+ * instead of surfacing a driver error. This recognises it wherever it
  * surfaces -- a failed run, a query, an analyze mutation.
  */
 export function isNoConnection(err: unknown): boolean {

@@ -54,12 +54,12 @@ def test_pipeline_yields_materialized_document(monkeypatch):
     ]
     ctx = make_ctx(openai=FakeOpenAI(scripted))
     monkeypatch.setattr(
-        report_mod, "get_schema_context", lambda ctx, **kw: "TABLE jira.issues"
+        report_mod, "build_catalog", lambda ctx, **kw: "SOURCE main [clickhouse]\n  jira.issues (month, issues)"
     )
 
     captured_rows = [["2026-01", 10], ["2026-02", 20]]
 
-    def fake_run_sql(sql, *, ctx=None):
+    def fake_run_sql(sql, *, ctx=None, source=None):
         return QueryResult(
             columns=["month", "issues"],
             rows=[list(r) for r in captured_rows],
@@ -105,7 +105,7 @@ def test_bad_dataset_reference_degrades_not_raises(monkeypatch):
         _response(_message(content=reporter_json)),
     ]
     ctx = make_ctx(openai=FakeOpenAI(scripted))
-    monkeypatch.setattr(report_mod, "get_schema_context", lambda ctx, **kw: "schema")
+    monkeypatch.setattr(report_mod, "build_catalog", lambda ctx, **kw: "SOURCE main [clickhouse]")
 
     result = report_mod.generate_report("anything", ctx=ctx)
     # Degraded to a paragraph note rather than raising.

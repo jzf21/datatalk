@@ -20,7 +20,7 @@ from datatalk.agent import planner as planner_mod
 from datatalk.agent import reporter as reporter_mod
 from datatalk.agent.blocks import Document, materialize
 from datatalk.agent.sqlloop import EventFn
-from datatalk.db.introspect import get_schema_context
+from datatalk.warehouse.catalog import build_catalog
 from datatalk.llm.prompts import MEMORY_BLOCK_TEMPLATE
 
 if TYPE_CHECKING:
@@ -64,7 +64,7 @@ def generate_report(
             on_event(kind, data)
 
     emit("status", {"message": "Loading schema…"})
-    schema_context = get_schema_context(ctx)
+    schema_context = build_catalog(ctx)
     memory_block = build_memory_block(memory_suggestions)
 
     # 1. Planner
@@ -77,7 +77,7 @@ def generate_report(
     )
     emit("plan", {"sections": [s.to_dict() for s in sections]})
 
-    # 2. Analyst — the only agent that touches ClickHouse.
+    # 2. Analyst — the only agent that touches the warehouses.
     emit("status", {"message": "Gathering data…"})
     loop = analyst_mod.gather_data(
         request,
@@ -91,7 +91,9 @@ def generate_report(
 
     # 3. Reporter — authors a dataset-referencing Document (no numbers typed).
     emit("status", {"message": "Writing the report…"})
-    authoring = reporter_mod.write_report(request, sections, loop.datasets, ctx=ctx)
+    authoring = reporter_mod.write_report(
+        request, sections, loop.datasets, ctx=ctx, sources=loop.dataset_sources
+    )
 
     # Materialize dataset references into concrete values.
     document = materialize(authoring, loop.datasets)

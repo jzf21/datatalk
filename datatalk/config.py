@@ -30,6 +30,15 @@ class Settings(BaseSettings):
     openai_embed_model: str = Field(
         default="text-embedding-3-small", alias="OPENAI_EMBED_MODEL"
     )
+    # The data-documentation agent. It runs rarely, agentically, over a whole
+    # warehouse, and its output then lands in every later prompt -- so it is
+    # worth a stronger (slower, pricier) model than the per-report loop.
+    # Optionally a different endpoint entirely, e.g. reports on a self-hosted
+    # model while documentation runs on a frontier one. Empty = reuse the
+    # OPENAI_* values above.
+    openai_docs_model: str = Field(default="", alias="OPENAI_DOCS_MODEL")
+    openai_docs_base_url: str = Field(default="", alias="OPENAI_DOCS_BASE_URL")
+    openai_docs_api_key: str = Field(default="", alias="OPENAI_DOCS_API_KEY")
 
     # ClickHouse
     clickhouse_host: str = Field(default="localhost", alias="CLICKHOUSE_HOST")
@@ -127,6 +136,26 @@ class Settings(BaseSettings):
     @property
     def has_openai(self) -> bool:
         return bool(self.openai_api_key and self.openai_api_key != "sk-...")
+
+    @property
+    def docs_model(self) -> str:
+        return self.openai_docs_model or self.openai_model
+
+    @property
+    def docs_openai_settings(self) -> "Settings":
+        """Settings whose ``openai_*`` fields address the documentation endpoint.
+
+        Returns ``self`` when nothing is overridden, so ``clients.openai_for``
+        hands back the very same shared client and nothing extra is cached.
+        """
+        if not (self.openai_docs_base_url or self.openai_docs_api_key):
+            return self
+        return self.model_copy(
+            update={
+                "openai_api_key": self.openai_docs_api_key or self.openai_api_key,
+                "openai_base_url": self.openai_docs_base_url or self.openai_base_url,
+            }
+        )
 
 
 @lru_cache(maxsize=1)

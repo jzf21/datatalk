@@ -93,7 +93,7 @@ export function QAThread({
         />
         <div className="mt-2 flex items-center justify-between gap-4">
           <p className="text-[12px] text-ink-tertiary">
-            Answers query ClickHouse fresh — they aren&rsquo;t limited to
+            Answers query your data sources fresh — they aren&rsquo;t limited to
             what&rsquo;s in this report.
           </p>
           <Button size="sm" onClick={ask} disabled={run.running || !question.trim()}>

@@ -27,11 +27,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <div className="px-4 py-5">
           <Link
             href="/reports"
-            className="text-[15px] font-semibold tracking-[-0.012em] text-ink-primary"
+            className="display text-[22px] tracking-[-0.02em] text-ink-primary"
           >
             DataTalk
           </Link>
-          <p className="mt-0.5 text-[12px] text-ink-tertiary">
+          <p className="mt-1 text-[12px] text-ink-tertiary">
             Every number cites its query
           </p>
         </div>

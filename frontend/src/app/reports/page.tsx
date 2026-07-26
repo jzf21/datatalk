@@ -43,11 +43,7 @@ export default function ReportsPage() {
     <>
       <PageHeader
         title={idle ? "New report" : state.request}
-        meta={
-          idle
-            ? "Ask a question. Every number comes back with the query behind it."
-            : summarize(state)
-        }
+        meta={idle ? undefined : summarize(state)}
         actions={
           !idle ? (
             <Button variant="outline" size="sm" onClick={run.reset}>
@@ -59,12 +55,16 @@ export default function ReportsPage() {
 
       <PageBody className="space-y-10">
         {idle && (
-          <Composer
-            placeholder="e.g. Summarize ticket resolution trends by account, and call out anything unusual."
-            examples={EXAMPLES}
-            submitLabel="Generate"
-            onSubmit={generate}
-          />
+          <div className="py-8 sm:py-14">
+            <Composer
+              heading="Ask your warehouse"
+              subheading="a question worth an answer."
+              placeholder="e.g. Summarize ticket resolution trends by account, and call out anything unusual."
+              examples={EXAMPLES}
+              submitLabel="Generate"
+              onSubmit={generate}
+            />
+          </div>
         )}
 
         {!idle && !state.document && (

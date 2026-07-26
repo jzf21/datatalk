@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from datatalk.agent.blocks import Document, parse_json_object
+from datatalk.agent.context_block import build_context_block
 from datatalk.agent.planner import Section, plan_to_text
 from datatalk.agent.sqlloop import dataset_previews
 from datatalk.llm.prompts import BLOCK_SCHEMA_DOC, REPORTER_SYSTEM, _ANTI_FABRICATION
@@ -23,16 +24,23 @@ def write_report(
     datasets: dict,
     *,
     ctx: "TenantContext",
+    sources: dict[str, str] | None = None,
 ) -> Document:
-    """Return an *authoring* Document referencing the captured datasets by id."""
+    """Return an *authoring* Document referencing the captured datasets by id.
+
+    ``sources`` maps dataset id to the source it came from, so the Reporter can
+    say which warehouse a block's numbers are drawn from.
+    """
     system = REPORTER_SYSTEM.format(
-        block_schema=BLOCK_SCHEMA_DOC, anti_fabrication=_ANTI_FABRICATION
+        block_schema=BLOCK_SCHEMA_DOC,
+        anti_fabrication=_ANTI_FABRICATION,
+        context_block=build_context_block(ctx),
     )
     user = (
         f"User request:\n{request}\n\n"
         f"Report plan:\n{plan_to_text(sections)}\n\n"
         f"Captured datasets (reference these by dataset_id):\n"
-        f"{dataset_previews(datasets)}"
+        f"{dataset_previews(datasets, sources=sources)}"
     )
     resp = ctx.openai.chat.completions.create(
         model=ctx.model,

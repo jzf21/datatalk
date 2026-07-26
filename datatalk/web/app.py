@@ -10,6 +10,7 @@ import json
 import logging
 import queue
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -23,14 +24,15 @@ from datatalk.agent.analyze import analyze_dashboard, analyze_report
 from datatalk.agent.dashboard import generate_dashboard
 from datatalk.agent.qa import answer_question
 from datatalk.agent.report import generate_report
+from datatalk.auth import orgs as orgs_svc
 from datatalk.auth import sessions as sessions_svc
 from datatalk.config import get_settings
-from datatalk.db import clickhouse, introspect
-from datatalk.db.introspect import get_schema_context
 from datatalk.db.session import get_engine, session_scope
 from datatalk.llm import client as llm_client
 from datatalk.memory.store import MemoryStore
-from datatalk.web import routes_auth, routes_orgs
+from datatalk.warehouse.catalog import build_catalog
+from datatalk.web import routes_auth, routes_datacontext, routes_orgs
+from datatalk.web.streaming import ndjson
 from datatalk.context import NoConnectionError
 from datatalk.web.deps import (
     RequestContext,
@@ -61,6 +63,14 @@ async def lifespan(app: FastAPI):
         raise RuntimeError(
             "Database schema is out of date. Run:  datatalk-db upgrade"
         )
+
+    # Deliberately not in the try below: a bad bootstrap password is a config
+    # error, and starting anyway would leave a closed-signup deployment with no
+    # way in at all.
+    with session_scope() as db:
+        made = orgs_svc.bootstrap_from_settings(db, settings)
+    if made:
+        logger.info("Bootstrap created: %s.", made)
 
     try:
         with session_scope() as db:
@@ -164,22 +174,38 @@ def index() -> dict[str, Any]:
 
 # --- health / schema (connection checkout) ---
 
-@api.get("/health")
-def health(rctx: RequestContext = Depends(require_connection)) -> dict[str, Any]:
-    ctx = rctx.tenant
-    settings = ctx.settings
-    result: dict[str, Any] = {"clickhouse": {"ok": False}, "openai": {"ok": False}}
+def _check_source(ctx, ref) -> dict[str, Any]:
+    """Ping one source. Never raises: a dead source is a reported state."""
+    base = {"name": ref.name, "type": ref.type, "is_default": ref.is_default}
     try:
-        info = clickhouse.ping(ctx.clickhouse)
-        tables = introspect.introspect(ctx.clickhouse, ctx.settings, with_samples=False)
-        result["clickhouse"] = {
+        warehouse = ctx.warehouse(ref.name)
+        info = warehouse.ping()
+        tables = warehouse.introspect(with_samples=False)
+        return {
+            **base,
             "ok": True,
             "version": info["version"],
             "database": info["database"],
             "table_count": len(tables),
         }
     except Exception as exc:  # noqa: BLE001
-        result["clickhouse"] = {"ok": False, "error": str(exc)}
+        return {**base, "ok": False, "error": str(exc)}
+
+
+@api.get("/health")
+def health(rctx: RequestContext = Depends(require_connection)) -> dict[str, Any]:
+    ctx = rctx.tenant
+    settings = ctx.settings
+    result: dict[str, Any] = {"sources": [], "openai": {"ok": False}}
+
+    refs = list(ctx.sources)
+    if len(refs) > 1:
+        # Checking sources serially makes the health pill as slow as the sum of
+        # every warehouse handshake, including the dead ones' timeouts.
+        with ThreadPoolExecutor(max_workers=min(4, len(refs))) as pool:
+            result["sources"] = list(pool.map(lambda r: _check_source(ctx, r), refs))
+    else:
+        result["sources"] = [_check_source(ctx, r) for r in refs]
 
     if settings.has_openai:
         try:
@@ -195,7 +221,7 @@ def health(rctx: RequestContext = Depends(require_connection)) -> dict[str, Any]
 @api.get("/schema")
 def schema(refresh: bool = False, rctx: RequestContext = Depends(require_connection)) -> dict[str, Any]:
     try:
-        context = introspect.get_schema_context(rctx.tenant, force_refresh=refresh)
+        context = build_catalog(rctx.tenant, force_refresh=refresh)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=str(exc))
     return {"schema_context": context}
@@ -203,9 +229,8 @@ def schema(refresh: bool = False, rctx: RequestContext = Depends(require_connect
 
 # --- report generation (streaming NDJSON) ---
 
-def _ndjson(kind: str, data: dict[str, Any]) -> str:
-    # default=str: materialized rows can hold datetimes/Decimals from ClickHouse.
-    return json.dumps({"kind": kind, "data": data}, default=str) + "\n"
+# Shared with routes_datacontext, so the two stream the same event encoding.
+_ndjson = ndjson
 
 
 @api.post("/report")
@@ -442,7 +467,7 @@ def ask(report_id: int, req: AskRequest, rctx: RequestContext = Depends(require_
                     # Kept inside the worker: introspection can take seconds and
                     # hoisting it would delay the first NDJSON byte, hiding the
                     # "Querying (step 1)…" status the user relies on.
-                    schema_context=get_schema_context(ctx),
+                    schema_context=build_catalog(ctx),
                     on_event=on_event,
                 )
             except Exception as exc:  # noqa: BLE001
@@ -587,4 +612,5 @@ def get_report(report_id: int, rctx: RequestContext = Depends(get_request_ctx)) 
 # before it is attached to the app.
 app.include_router(routes_auth.router)   # public: signup / login / logout / me
 app.include_router(routes_orgs.router)   # protected via its own dependencies
+app.include_router(routes_datacontext.router)  # ditto
 app.include_router(api)

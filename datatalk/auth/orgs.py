@@ -1,4 +1,4 @@
-"""Org lookup, membership, and building a TenantContext from stored credentials."""
+"""Org lookup, membership, and building a TenantContext from stored sources."""
 
 from __future__ import annotations
 
@@ -9,8 +9,9 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from datatalk.config import Settings, get_settings
-from datatalk.context import TenantContext
+from datatalk.context import SourceRef, TenantContext
 from datatalk.db import models
+from datatalk.warehouse import WarehouseSpec
 
 _SLUG_STRIP = re.compile(r"[^a-z0-9]+")
 
@@ -49,61 +50,155 @@ def list_memberships(db: Session, user_id: UUID) -> list[models.Membership]:
     )
 
 
-def default_connection(db: Session, org_id: UUID) -> models.OrgClickHouseConnection | None:
+def default_connection(db: Session, org_id: UUID) -> models.OrgWarehouseConnection | None:
     return db.execute(
-        select(models.OrgClickHouseConnection).where(
-            models.OrgClickHouseConnection.org_id == org_id,
-            models.OrgClickHouseConnection.is_default.is_(True),
+        select(models.OrgWarehouseConnection).where(
+            models.OrgWarehouseConnection.org_id == org_id,
+            models.OrgWarehouseConnection.is_default.is_(True),
         )
     ).scalar_one_or_none()
 
 
-def effective_settings(
-    connection: models.OrgClickHouseConnection | None,
-    base: Settings | None = None,
-) -> Settings:
-    """Overlay an org's stored connection onto the environment defaults.
+def list_connections(db: Session, org_id: UUID) -> list[models.OrgWarehouseConnection]:
+    """Every source an org has, default first then by name.
 
-    The env provides everything not org-specific (OpenAI credentials, guardrail
-    ceilings); the org row overrides the ClickHouse target and, where set, the
-    introspection and SQL limits.
-
-    With no connection the env settings come back untouched, which keeps OpenAI
-    and the guardrails working -- but the resulting context is marked
-    ``has_connection=False`` by :func:`build_tenant_context`, so the env
-    ``CLICKHOUSE_*`` values are never actually dialled. See
-    :class:`datatalk.context.NoConnectionError`.
+    That order is what the agent sees, and the first entry is what
+    ``ctx.warehouse(None)`` resolves to.
     """
-    base = base or get_settings()
-    if connection is None:
-        return base
+    return list(
+        db.execute(
+            select(models.OrgWarehouseConnection)
+            .where(models.OrgWarehouseConnection.org_id == org_id)
+            .order_by(
+                models.OrgWarehouseConnection.is_default.desc(),
+                models.OrgWarehouseConnection.name.asc(),
+            )
+        ).scalars()
+    )
 
-    overrides: dict[str, object] = {
-        "CLICKHOUSE_HOST": connection.host,
-        "CLICKHOUSE_PORT": connection.port,
-        "CLICKHOUSE_USER": connection.username,
-        "CLICKHOUSE_PASSWORD": connection.password or "",
-        "CLICKHOUSE_DATABASE": connection.database,
-        "CLICKHOUSE_SECURE": connection.secure,
-        "INTROSPECT_DATABASES": ",".join(connection.introspect_databases or []),
-        "INTROSPECT_EXCLUDE_TABLE_PATTERNS": ",".join(
-            connection.introspect_exclude_patterns or []
+
+def get_connection(
+    db: Session, org_id: UUID, connection_id: UUID
+) -> models.OrgWarehouseConnection | None:
+    """One source, scoped to the org.
+
+    Scoped, not a bare ``db.get``: an id from another org must read as absent
+    so the endpoint can 404 rather than confirm it exists.
+    """
+    return db.execute(
+        select(models.OrgWarehouseConnection).where(
+            models.OrgWarehouseConnection.id == connection_id,
+            models.OrgWarehouseConnection.org_id == org_id,
+        )
+    ).scalar_one_or_none()
+
+
+def bootstrap_from_settings(db: Session, base: Settings | None = None) -> str | None:
+    """Create the configured org + owner if they are absent. Idempotent.
+
+    Without this, a deployment with ``DATATALK_ALLOW_OPEN_SIGNUP=false`` has no
+    way to create its first account: signup is closed and there is no CLI for
+    it. Returns a short description of what it made, or None when unconfigured
+    or when everything already existed.
+    """
+    from datatalk.auth import passwords
+
+    settings = base or get_settings()
+    email = (settings.bootstrap_admin_email or "").strip()
+    org_name = (settings.bootstrap_org_name or "").strip()
+    password = settings.bootstrap_admin_password or ""
+    if not (email and org_name and password):
+        return None
+
+    made: list[str] = []
+
+    # lower(email), matching signup and the ix_users_email_lower unique index.
+    user = db.execute(
+        select(models.User).where(func.lower(models.User.email) == email.lower())
+    ).scalar_one_or_none()
+    if user is None:
+        user = models.User(
+            email=email, password_hash=passwords.hash_password(password)
+        )
+        db.add(user)
+        db.flush()
+        made.append(f"user {email}")
+
+    org = db.execute(
+        select(models.Org).where(func.lower(models.Org.name) == org_name.lower())
+    ).scalar_one_or_none()
+    if org is None:
+        org = models.Org(name=org_name, slug=unique_slug(db, org_name))
+        db.add(org)
+        db.flush()
+        made.append(f"org {org.slug}")
+
+    if get_membership(db, org.id, user.id) is None:
+        db.add(models.Membership(org_id=org.id, user_id=user.id, role="owner"))
+        db.flush()
+        made.append("owner membership")
+
+    return ", ".join(made) if made else None
+
+
+def spec_from_connection(
+    connection: models.OrgWarehouseConnection,
+    base: Settings | None = None,
+) -> WarehouseSpec:
+    """Turn a stored source row into a connectable spec.
+
+    The env supplies the ceilings a source inherits when it sets no override
+    (``INTROSPECT_*``, ``SQL_*``); everything about *reaching* the warehouse
+    comes from the row. Nullable columns mean "inherit", so ``or``-style
+    defaulting would wrongly swallow a deliberate zero -- hence the explicit
+    ``is None`` checks.
+
+    This replaced an earlier trick of overlaying the row onto ``Settings`` as
+    ``CLICKHOUSE_*`` keys, which could only ever describe one source and one
+    engine.
+    """
+    s = base or get_settings()
+
+    def override(value: int | None, fallback: int) -> int:
+        return fallback if value is None else value
+
+    return WarehouseSpec(
+        type=connection.type,
+        host=connection.host,
+        port=connection.port,
+        username=connection.username,
+        password=connection.password or "",
+        database=connection.database,
+        secure=connection.secure,
+        sslmode=connection.sslmode,
+        introspect_databases=tuple(connection.introspect_databases or ()),
+        introspect_exclude_patterns=tuple(
+            p.lower() for p in (connection.introspect_exclude_patterns or ())
         ),
-    }
-    optional = {
-        "INTROSPECT_SAMPLE_ROWS": connection.introspect_sample_rows,
-        "INTROSPECT_MAX_TABLES": connection.introspect_max_tables,
-        "SQL_DEFAULT_LIMIT": connection.sql_default_limit,
-        "SQL_MAX_ROWS": connection.sql_max_rows,
-        "SQL_TIMEOUT_SECONDS": connection.sql_timeout_seconds,
-    }
-    overrides.update({k: v for k, v in optional.items() if v is not None})
+        introspect_sample_rows=override(
+            connection.introspect_sample_rows, s.introspect_sample_rows
+        ),
+        introspect_max_tables=override(
+            connection.introspect_max_tables, s.introspect_max_tables
+        ),
+        sql_default_limit=override(connection.sql_default_limit, s.sql_default_limit),
+        sql_max_rows=override(connection.sql_max_rows, s.sql_max_rows),
+        sql_timeout_seconds=override(
+            connection.sql_timeout_seconds, s.sql_timeout_seconds
+        ),
+    )
 
-    # Start from the env values so unrelated settings (OpenAI, pool sizes) are
-    # preserved, then apply the org's overrides on top.
-    merged = base.model_dump(by_alias=True)
-    merged.update(overrides)
-    return Settings(**merged)
+
+def source_ref(
+    connection: models.OrgWarehouseConnection, base: Settings | None = None
+) -> SourceRef:
+    return SourceRef.from_spec(
+        spec_from_connection(connection, base),
+        id=connection.id,
+        name=connection.name,
+        description=connection.description or "",
+        is_default=connection.is_default,
+    )
 
 
 def build_tenant_context(
@@ -113,14 +208,28 @@ def build_tenant_context(
     user: models.User | None,
     role: str,
 ) -> TenantContext:
-    """The one place a request-scoped TenantContext is constructed."""
-    connection = default_connection(db, org.id)
-    return TenantContext.from_settings(
-        effective_settings(connection),
+    """The one place a request-scoped TenantContext is constructed.
+
+    Loads *every* source the org has -- the agent chooses between them per
+    query, so there is no selection to make here. An org with none gets an
+    empty tuple, which is what makes ``has_connection`` false and leaves no
+    path to the deployment's own warehouse.
+
+    The context model is loaded here too, for the same reason the sources are:
+    this is the last point that holds a session. The agent worker threads that
+    read it have none.
+    """
+    from datatalk.memory.datacontext import load_context
+
+    base = get_settings()
+    sources = tuple(source_ref(c, base) for c in list_connections(db, org.id))
+    return TenantContext.from_sources(
+        sources,
         org_id=org.id,
         org_slug=org.slug,
         user_id=user.id if user else None,
         user_email=user.email if user else "",
         role=role,
-        has_connection=connection is not None,
+        settings=base,
+        context_model=load_context(db, org.id),
     )

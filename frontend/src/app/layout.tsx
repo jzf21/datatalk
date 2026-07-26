@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { IBM_Plex_Sans, IBM_Plex_Mono } from "next/font/google";
+import { IBM_Plex_Sans, IBM_Plex_Mono, Newsreader } from "next/font/google";
 import "./globals.css";
 
 import { AppShell } from "@/components/layout/app-shell";
@@ -23,6 +23,17 @@ const plexMono = IBM_Plex_Mono({
   display: "swap",
 });
 
+// The editorial "read me" voice. Newsreader is a literary serif with a true
+// display optical size and a working italic -- it carries the hero prompts and
+// page titles while Plex handles every control. Used with restraint; see DESIGN.md.
+const newsreader = Newsreader({
+  variable: "--font-newsreader",
+  subsets: ["latin"],
+  weight: ["400", "500"],
+  style: ["normal", "italic"],
+  display: "swap",
+});
+
 export const metadata: Metadata = {
   title: "DataTalk",
   description: "Ask your warehouse a question. Every number cites its query.",
@@ -36,7 +47,7 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${plexSans.variable} ${plexMono.variable} h-full antialiased`}
+      className={`${plexSans.variable} ${plexMono.variable} ${newsreader.variable} h-full antialiased`}
     >
       <body className="min-h-full">
         <Providers>

@@ -8,12 +8,21 @@ branch on them:
     403 forbidden             -> hide/disable admin controls
     409 no_connection         -> open the connection settings panel
     403 cross_origin_request  -> should never reach a real user
+
+Context model (see web/routes_datacontext.py):
+
+    404 context_file_not_found -> the file was deleted, or belongs to another org
+    409 context_file_exists    -> creating a path that is already taken
+    409 context_file_limit     -> past the per-workspace file cap
+    409 context_exists         -> "replace" would discard curated docs; confirm
+    409 context_generating     -> a run is already in flight for this org
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from urllib.parse import urlparse
+from uuid import UUID
 
 from fastapi import Depends, HTTPException, Request
 from sqlalchemy.orm import Session
@@ -170,3 +179,19 @@ def require_connection(
     if not rctx.tenant.has_connection:
         raise HTTPException(status_code=409, detail="no_connection")
     return rctx
+
+
+def require_admin(rctx: RequestContext) -> None:
+    """403 unless the caller owns or administers the acting org."""
+    if rctx.tenant.role not in {"owner", "admin"}:
+        raise HTTPException(status_code=403, detail="forbidden")
+
+
+def require_same_org(rctx: RequestContext, org_id: UUID) -> None:
+    """404 -- never 403 -- when the path names another org.
+
+    Confirming that someone else's org id exists is itself a leak, so a
+    cross-org path reads exactly like a missing one.
+    """
+    if rctx.tenant.org_id != org_id:
+        raise HTTPException(status_code=404, detail="org_not_found")

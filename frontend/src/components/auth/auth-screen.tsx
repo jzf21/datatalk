@@ -45,10 +45,8 @@ export function AuthScreen() {
     <div className="flex min-h-screen items-center justify-center p-6">
       <div className="w-full max-w-[380px]">
         <div className="mb-8">
-          <h1 className="text-[24px] font-semibold tracking-[-0.015em] text-ink-primary">
-            DataTalk
-          </h1>
-          <p className="mt-1 text-[13px] text-ink-secondary">
+          <h1 className="display text-[34px] tracking-[-0.02em]">DataTalk</h1>
+          <p className="mt-1.5 text-[13px] text-ink-secondary">
             Ask your warehouse a question. Every number cites its query.
           </p>
         </div>

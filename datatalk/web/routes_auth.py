@@ -203,14 +203,20 @@ def me(request: Request, db: Session = Depends(get_db)) -> dict[str, Any]:
         memberships[0] if memberships else None,
     )
     current_org = _org_payload(db.get(models.Org, current.org_id), current.role) if current else None
-    connection = (
-        orgs_svc.default_connection(db, current.org_id) if current else None
-    )
+    connections = orgs_svc.list_connections(db, current.org_id) if current else []
 
     return {
         "authenticated": True,
         "user": _user_payload(user),
         "org": current_org,
         "orgs": orgs_out,
-        "connection": {"configured": connection is not None},
+        # "configured" is what gates the connect-your-data prompt; the count and
+        # names let the UI name the sources without a second round trip.
+        "connection": {
+            "configured": bool(connections),
+            "count": len(connections),
+            "sources": [
+                {"name": c.name, "type": c.type} for c in connections
+            ],
+        },
     }
