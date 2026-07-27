@@ -60,7 +60,14 @@ class _ConnectionBase(BaseModel):
     password: str | None = None
     database: str
     secure: bool = False
-    introspect_databases: list[str] | None = None
+    # Introspection scope. ``introspect_databases`` is a namespace allowlist
+    # (ClickHouse databases, Postgres schemas); ``introspect_tables`` holds
+    # qualified ``namespace.table`` entries and narrows *within* a namespace --
+    # one named there shows only its listed tables, one absent shows all of
+    # them. Both empty means "everything", which is what every source did
+    # before the scope picker existed.
+    introspect_databases: list[str] | None = Field(default=None, max_length=200)
+    introspect_tables: list[str] | None = Field(default=None, max_length=2000)
     introspect_exclude_patterns: list[str] | None = None
 
 
@@ -241,31 +248,7 @@ def test_connection(
     _require_same_org(rctx, org_id)
     _require_admin(rctx)
 
-    password = req.password
-    if password is None:
-        # Editing an existing source without retyping its password: reuse the
-        # stored one, matched by name since the candidate has no id yet.
-        stored = next(
-            (c for c in orgs_svc.list_connections(db, org_id) if c.name == req.name),
-            None,
-        )
-        password = stored.password if stored else ""
-
-    candidate = models.OrgWarehouseConnection(
-        org_id=org_id,
-        name=req.name,
-        type=req.type,
-        host=req.host,
-        port=req.port,
-        username=req.user,
-        password=password,
-        database=req.database,
-        secure=req.secure,
-        sslmode=getattr(req, "sslmode", None),
-        introspect_databases=req.introspect_databases or [],
-        introspect_exclude_patterns=req.introspect_exclude_patterns or [],
-    )
-    spec = orgs_svc.spec_from_connection(candidate)
+    spec = orgs_svc.spec_from_connection(_candidate(db, org_id, req))
 
     wh = None
     try:
@@ -285,6 +268,85 @@ def test_connection(
     finally:
         if wh is not None:
             wh.close()
+
+
+@router.post("/{org_id}/connections/discover")
+def discover_connection(
+    org_id: UUID,
+    req: ConnectionRequest,
+    rctx: RequestContext = Depends(get_request_ctx),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Browse the namespaces and tables a candidate source can see.
+
+    This is what the scope picker lists, so it deliberately reports what the
+    saved scope *excludes* -- a picker restricted to the current selection could
+    never be used to widen it. Like ``test``, it takes a whole connection body
+    rather than an id, so the picker works on a source that has not been saved
+    yet, and it returns 200 with ``ok: false`` on a driver error.
+    """
+    _require_same_org(rctx, org_id)
+    _require_admin(rctx)
+
+    spec = orgs_svc.spec_from_connection(_candidate(db, org_id, req))
+
+    wh = None
+    try:
+        wh = warehouse.create(spec)
+        namespaces, truncated = wh.discover()
+        return {
+            "ok": True,
+            "truncated": truncated,
+            "databases": [
+                {
+                    "name": ns.namespace,
+                    "tables": [
+                        {"name": t.name, "rows": t.total_rows, "comment": t.comment}
+                        for t in ns.tables
+                    ],
+                }
+                for ns in namespaces
+            ],
+        }
+    except Exception as exc:  # noqa: BLE001 - surface any driver error to the UI
+        return {"ok": False, "error": str(exc)}
+    finally:
+        if wh is not None:
+            wh.close()
+
+
+def _candidate(
+    db: Session, org_id: UUID, req: Any
+) -> models.OrgWarehouseConnection:
+    """An unsaved row for a candidate source, for ``test`` and ``discover``.
+
+    Never added to the session: both callers want a spec to connect with, not a
+    row. A ``None`` password means "keep the stored one", matched by name since
+    a candidate has no id yet.
+    """
+    password = req.password
+    if password is None:
+        stored = next(
+            (c for c in orgs_svc.list_connections(db, org_id) if c.name == req.name),
+            None,
+        )
+        password = stored.password if stored else ""
+
+    return models.OrgWarehouseConnection(
+        org_id=org_id,
+        name=req.name,
+        type=req.type,
+        host=req.host,
+        port=req.port,
+        username=req.user,
+        password=password,
+        database=req.database,
+        secure=req.secure,
+        sslmode=getattr(req, "sslmode", None),
+        introspect_databases=req.introspect_databases or [],
+        introspect_tables=req.introspect_tables or [],
+        introspect_exclude_patterns=req.introspect_exclude_patterns or [],
+    )
 
 
 @router.delete("/{org_id}/connections/{connection_id}", status_code=204)
@@ -341,6 +403,8 @@ def _apply(
         connection.password = req.password  # encrypted by the column type
     if req.introspect_databases is not None:
         connection.introspect_databases = req.introspect_databases
+    if req.introspect_tables is not None:
+        connection.introspect_tables = req.introspect_tables
     if req.introspect_exclude_patterns is not None:
         connection.introspect_exclude_patterns = req.introspect_exclude_patterns
     connection.updated_by_user_id = rctx.user.id

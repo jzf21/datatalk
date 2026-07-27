@@ -34,10 +34,26 @@ def plan_report(
     ctx: "TenantContext",
     schema_context: str,
     memory_block: str = "",
+    context_block: str = "",
+    system_prompt: str = PLANNER_SYSTEM,
 ) -> list[Section]:
-    """Return an ordered list of planned report sections."""
-    system = PLANNER_SYSTEM.format(
-        schema_context=schema_context, memory_block=memory_block
+    """Return an ordered list of planned sections.
+
+    ``system_prompt`` swaps the planning instructions while keeping this
+    function's JSON contract: the dashboard passes ``DASHBOARD_PLANNER_SYSTEM``,
+    which plans the same ``sections`` shape but phrases each data_question as a
+    widget plus the dataset shape it needs. Any override must carry the
+    ``{schema_context}``, ``{memory_block}`` and ``{context_block}`` slots.
+
+    ``context_block`` is the Planner's only path to a context-model body: it
+    sees the file tree in the catalog but has no ``read_context`` tool, so the
+    caller pre-injects request-relevant files
+    (:func:`~datatalk.agent.context_block.build_planner_context_block`).
+    """
+    system = system_prompt.format(
+        schema_context=schema_context,
+        memory_block=memory_block,
+        context_block=context_block,
     )
     resp = ctx.openai.chat.completions.create(
         model=ctx.model,

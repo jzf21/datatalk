@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 
+import type { ConnectionPublic } from "@/lib/api/auth";
 import {
   DATA_SOURCES,
   getDataSource,
   sourceTypeName,
+  toConnectionInput,
 } from "@/lib/connections/sources";
 
 describe("data sources", () => {
@@ -32,6 +34,65 @@ describe("data sources", () => {
         expect(source.defaults).toHaveProperty(field.id);
       }
     }
+  });
+
+  it("rebuilds a stored source into an input the API accepts", () => {
+    const stored = {
+      id: "abc",
+      type: "clickhouse",
+      name: "analytics",
+      description: "events",
+      is_default: true,
+      host: "h.test",
+      port: 8123,
+      user: "reader",
+      database: "default",
+      secure: true,
+      sslmode: null,
+      has_password: true,
+      introspect_databases: ["web"],
+      introspect_tables: ["web.pageviews"],
+    } as ConnectionPublic;
+
+    const input = toConnectionInput(stored);
+
+    // Null, not "": the UI never receives the secret, so this is the only way
+    // to save any other field without destroying it.
+    expect(input.password).toBeNull();
+    expect(input.introspect_databases).toEqual(["web"]);
+    expect(input.name).toBe("analytics");
+    expect(input.secure).toBe(true);
+  });
+
+  it("applies overrides over the stored values", () => {
+    // How the scope screen saves one field of a source it never loaded a form
+    // for: everything else has to go back unchanged.
+    const stored = {
+      id: "abc",
+      type: "postgres",
+      name: "billing",
+      description: "",
+      is_default: false,
+      host: "h.test",
+      port: 5432,
+      user: "u",
+      database: "billing",
+      secure: false,
+      sslmode: "require",
+      has_password: true,
+      introspect_databases: ["public"],
+      introspect_tables: [],
+    } as ConnectionPublic;
+
+    const input = toConnectionInput(stored, {
+      introspect_databases: ["reporting"],
+      introspect_tables: ["reporting.invoices"],
+    });
+
+    expect(input.introspect_databases).toEqual(["reporting"]);
+    expect(input.introspect_tables).toEqual(["reporting.invoices"]);
+    expect(input.sslmode).toBe("require");
+    expect(input.host).toBe("h.test");
   });
 
   it("gives each engine its own connection defaults", () => {

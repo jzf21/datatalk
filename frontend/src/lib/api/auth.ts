@@ -112,6 +112,29 @@ export interface ConnectionInput {
   secure: boolean;
   /** Postgres only. */
   sslmode?: SslMode | null;
+  /**
+   * Introspection scope. `introspect_databases` allowlists namespaces
+   * (ClickHouse databases, Postgres schemas); `introspect_tables` holds
+   * qualified `namespace.table` entries and narrows *within* a namespace -- one
+   * named there shows only its listed tables, one absent shows all of them.
+   * Both empty means the whole server, which is how sources behaved before the
+   * scope picker existed.
+   */
+  introspect_databases?: string[];
+  introspect_tables?: string[];
+}
+
+/** One namespace as the discover endpoint reports it. */
+export interface DiscoveredNamespace {
+  name: string;
+  tables: { name: string; rows: number | null; comment: string }[];
+}
+
+export interface DiscoverResponse {
+  ok: boolean;
+  error?: string;
+  truncated?: boolean;
+  databases?: DiscoveredNamespace[];
 }
 
 export interface ConnectionPublic extends Omit<ConnectionInput, "password"> {
@@ -145,6 +168,14 @@ export const testConnection = (orgId: string, input: ConnectionInput) =>
     `/api/orgs/${orgId}/connections/test`,
     input,
   );
+
+/**
+ * List every namespace and table the candidate connection can see, ignoring
+ * its own scope -- the picker has to show what the scope currently excludes.
+ * Like `testConnection`, it takes a whole input so it works before a save.
+ */
+export const discoverConnection = (orgId: string, input: ConnectionInput) =>
+  apiPost<DiscoverResponse>(`/api/orgs/${orgId}/connections/discover`, input);
 
 /** A session that expired mid-use, as opposed to any other failure. */
 export function isUnauthorized(err: unknown): boolean {

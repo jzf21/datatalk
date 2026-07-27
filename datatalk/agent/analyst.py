@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 from datatalk.agent.planner import Section, plan_to_text
 from datatalk.agent.sqlloop import EventFn, LoopResult, run_capture_loop
-from datatalk.llm.prompts import ANALYST_SYSTEM, _ANTI_FABRICATION
+from datatalk.llm.prompts import ANALYST_SYSTEM, ANTI_FABRICATION
 
 if TYPE_CHECKING:
     from datatalk.context import TenantContext
@@ -23,18 +23,29 @@ def gather_data(
     ctx: "TenantContext",
     schema_context: str,
     memory_block: str = "",
+    system_prompt: str = ANALYST_SYSTEM,
+    plan_label: str = "Report plan (gather data for every section)",
     on_event: EventFn | None = None,
     max_steps: int = 8,
+    deadline_s: float | None = None,
 ) -> LoopResult:
-    """Query ClickHouse to cover the plan; return captured datasets + history."""
-    system = ANALYST_SYSTEM.format(
-        anti_fabrication=_ANTI_FABRICATION,
+    """Query the org's warehouses to cover the plan; return captured datasets.
+
+    ``system_prompt`` swaps the Analyst's instructions for a deliverable that
+    needs a different dataset *shape* — the dashboard passes
+    ``DASHBOARD_ANALYST_SYSTEM``, whose KPI tiles read a single row. It must
+    carry the same ``{anti_fabrication}``/``{schema_context}``/``{memory_block}``
+    slots. The loop itself is untouched, so Q&A and the documentation profiler
+    cannot be affected by a change made here.
+    """
+    system = system_prompt.format(
+        anti_fabrication=ANTI_FABRICATION,
         schema_context=schema_context,
         memory_block=memory_block,
     )
     user = (
         f"User request:\n{request}\n\n"
-        f"Report plan (gather data for every section):\n{plan_to_text(sections)}"
+        f"{plan_label}:\n{plan_to_text(sections)}"
     )
     messages = [
         {"role": "system", "content": system},
@@ -45,4 +56,5 @@ def gather_data(
         ctx=ctx,
         max_steps=max_steps,
         on_event=on_event,
+        deadline_s=deadline_s,
     )

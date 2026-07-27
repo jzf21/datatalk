@@ -4,6 +4,7 @@ import { use, useState } from "react";
 
 import { PageBody, PageHeader } from "@/components/layout/page-header";
 import { DocumentView } from "@/components/doc/block-renderer";
+import { InsightPanel } from "@/components/doc/insight-panel";
 import { SourcesProvider } from "@/components/doc/sources-context";
 import { SourcesRail } from "@/components/doc/sources-rail";
 import { Markdown } from "@/components/markdown/markdown";
@@ -65,6 +66,13 @@ export default function DashboardPage({
       <PageBody className="space-y-10">
         <SourcesProvider queries={data.queries}>
           <DocumentView document={data.document} measure={false} />
+
+          {data.insights && (
+            <InsightPanel
+              insights={data.insights}
+              className="border-t border-border pt-8"
+            />
+          )}
 
           <section className="border-t border-border pt-8">
             <div className="mb-4 flex items-center justify-between gap-4">

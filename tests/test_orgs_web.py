@@ -21,12 +21,13 @@ from datatalk.db import models
 from tests.conftest import TEST_PASSWORD, give_connection, signup
 
 # Every endpoint that reaches a warehouse, with a minimal valid body.
+# /api/analyze is deliberately absent: it critiques text it is given and runs
+# zero SQL, so it follows the Postgres-only rule instead (see below).
 WAREHOUSE_ROUTES = [
     ("get", "/api/health", None),
     ("get", "/api/schema", None),
     ("post", "/api/report", {"request": "revenue"}),
     ("post", "/api/dashboard", {"request": "revenue"}),
-    ("post", "/api/analyze", {"text": "hi"}),
 ]
 
 
@@ -53,6 +54,45 @@ def test_postgres_routes_still_work_without_connection(connectionless_client):
     """The library and settings must load, or the user cannot fix the problem."""
     for path in ("/api/reports", "/api/dashboards", "/api/suggestions"):
         assert connectionless_client.get(path).status_code == 200, path
+
+
+def test_a_connectionless_org_can_analyze_pasted_text(
+    connectionless_client, monkeypatch
+):
+    """analyze critiques the text it is given and runs no SQL, so gating it on
+    a warehouse would lock a new org out of the one feature that needs none."""
+    import datatalk.web.app as web
+
+    monkeypatch.setattr(web, "analyze_report", lambda text, **kw: "## Fine")
+    resp = connectionless_client.post("/api/analyze", json={"text": "Q3 was up"})
+    assert resp.status_code == 200
+    assert resp.json() == {"analysis": "## Fine", "source": "external"}
+
+
+def test_a_dead_embeddings_endpoint_degrades_analyze_instead_of_500ing(
+    auth_client, monkeypatch
+):
+    import datatalk.web.app as web
+    from datatalk.memory.store import MemoryStore
+
+    seen = {}
+
+    def boom(self, *a, **kw):
+        raise RuntimeError("embeddings down")
+
+    monkeypatch.setattr(MemoryStore, "retrieve_suggestion_texts", boom)
+    monkeypatch.setattr(
+        web,
+        "analyze_report",
+        lambda text, memory_suggestions=None, **kw: (
+            seen.update(suggestions=memory_suggestions) or "## Still fine"
+        ),
+    )
+
+    resp = auth_client.post("/api/analyze", json={"text": "Q3 was up"})
+    assert resp.status_code == 200
+    assert resp.json()["analysis"] == "## Still fine"
+    assert seen["suggestions"] == []
 
 
 def test_deleting_the_last_source_re_closes_the_door(auth_client, db):
@@ -397,3 +437,97 @@ def test_connection_test_does_not_save(auth_client, db):
     )
     after = {c.name for c in orgs_svc.list_connections(db, auth_client.org_id)}
     assert after == before
+
+
+# --- the introspection scope --------------------------------------------------
+
+
+def test_the_scope_round_trips_through_create_and_update(auth_client, db):
+    org_id = auth_client.org_id
+
+    created = auth_client.post(
+        f"/api/orgs/{org_id}/connections",
+        json=_body(
+            name="scoped",
+            password="p",
+            introspect_databases=["analytics", "billing"],
+            introspect_tables=["analytics.events", "analytics.sessions"],
+        ),
+    )
+    assert created.status_code == 201
+    assert created.json()["introspect_databases"] == ["analytics", "billing"]
+    assert created.json()["introspect_tables"] == [
+        "analytics.events",
+        "analytics.sessions",
+    ]
+
+    updated = auth_client.put(
+        f"/api/orgs/{org_id}/connections/{created.json()['id']}",
+        json=_body(name="scoped", introspect_databases=["billing"], introspect_tables=[]),
+    )
+    assert updated.status_code == 200
+    assert updated.json()["introspect_databases"] == ["billing"]
+    # An emptied selection must actually clear, not fall through to "unchanged".
+    assert updated.json()["introspect_tables"] == []
+
+
+def test_an_omitted_scope_leaves_the_stored_one_alone(auth_client, db):
+    """The form always sends the scope, but a scripted caller need not."""
+    org_id = auth_client.org_id
+    created = auth_client.post(
+        f"/api/orgs/{org_id}/connections",
+        json=_body(name="keeper", password="p", introspect_databases=["analytics"]),
+    )
+    updated = auth_client.put(
+        f"/api/orgs/{org_id}/connections/{created.json()['id']}",
+        json=_body(name="keeper"),
+    )
+    assert updated.json()["introspect_databases"] == ["analytics"]
+
+
+# --- discovery endpoint -------------------------------------------------------
+
+
+def test_failed_discovery_is_a_200_not_a_502(auth_client):
+    """Same contract as test: the picker shows the driver error in place."""
+    resp = auth_client.post(
+        f"/api/orgs/{auth_client.org_id}/connections/discover",
+        json=_body(host="nonexistent.invalid", port=9, password="p"),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is False
+    assert body["error"]
+
+
+def test_discovery_does_not_save(auth_client, db):
+    before = {c.name for c in orgs_svc.list_connections(db, auth_client.org_id)}
+    auth_client.post(
+        f"/api/orgs/{auth_client.org_id}/connections/discover",
+        json=_body(name="candidate", host="candidate.invalid", password="p"),
+    )
+    after = {c.name for c in orgs_svc.list_connections(db, auth_client.org_id)}
+    assert after == before
+
+
+def test_members_cannot_browse_a_servers_contents(member_client):
+    """Discovery lists table names, so it is an admin route like test is."""
+    resp = member_client.post(
+        f"/api/orgs/{member_client.org_id}/connections/discover",
+        json=_body(host="h.test", password="p"),
+    )
+    assert resp.status_code == 403
+
+
+def test_discovering_another_orgs_source_is_404_not_403(auth_client, db):
+    other = models.Org(name="Other D", slug=orgs_svc.unique_slug(db, "Other D"))
+    db.add(other)
+    db.flush()
+    give_connection(db, other.id, host="secret.internal")
+
+    resp = auth_client.post(
+        f"/api/orgs/{other.id}/connections/discover",
+        json=_body(host="secret.internal", password="p"),
+    )
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "org_not_found"

@@ -262,11 +262,15 @@ function MainChart({ data, config }: { data: ChartData; config: ChartConfig }) {
             <Area
               key={s.key}
               dataKey={s.key}
+              stackId={data.stacked ? "a" : undefined}
               stroke={s.color}
               strokeWidth={2}
               fill={s.color}
               // Flat opacity, never a gradient: gradients are decoration.
-              fillOpacity={data.series.length === 1 ? 0.1 : 0.08}
+              // Stacked areas tile rather than overlap, so they can be denser.
+              fillOpacity={
+                data.stacked ? 0.3 : data.series.length === 1 ? 0.1 : 0.08
+              }
               type="linear"
               connectNulls={false}
               isAnimationActive={false}
@@ -292,13 +296,22 @@ function MainChart({ data, config }: { data: ChartData; config: ChartConfig }) {
       >
         {common}
         {axes}
-        {data.series.map((s) => (
+        {data.series.map((s, i) => (
           <Bar
             key={s.key}
             dataKey={s.key}
+            stackId={data.stacked ? "a" : undefined}
             fill={s.color}
-            // Rounded data-end, square at the baseline.
-            radius={horizontal ? [0, 4, 4, 0] : [4, 4, 0, 0]}
+            // Rounded data-end, square at the baseline. In a stack only the
+            // last segment is the data-end; rounding the rest draws gaps
+            // mid-stack.
+            radius={
+              data.stacked && i < data.series.length - 1
+                ? 0
+                : horizontal
+                  ? [0, 4, 4, 0]
+                  : [4, 4, 0, 0]
+            }
             maxBarSize={24}
             isAnimationActive={false}
           />

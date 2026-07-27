@@ -32,7 +32,7 @@ from datatalk.llm import client as llm_client
 from datatalk.memory.store import MemoryStore
 from datatalk.warehouse.catalog import build_catalog
 from datatalk.web import routes_auth, routes_datacontext, routes_orgs
-from datatalk.web.streaming import ndjson
+from datatalk.web.streaming import drain, ndjson
 from datatalk.context import NoConnectionError
 from datatalk.web.deps import (
     RequestContext,
@@ -231,6 +231,7 @@ def schema(refresh: bool = False, rctx: RequestContext = Depends(require_connect
 
 # Shared with routes_datacontext, so the two stream the same event encoding.
 _ndjson = ndjson
+_drain = drain
 
 
 @api.post("/report")
@@ -238,19 +239,25 @@ def report(req: ReportRequest, rctx: RequestContext = Depends(require_connection
     if not req.request.strip():
         raise HTTPException(status_code=400, detail="Empty request.")
 
-    store = rctx.store
     # Bound here, on the request thread, and captured by the worker closure
     # below. contextvars do NOT propagate into threading.Thread, so the tenant
     # must be passed explicitly or the worker would resolve the wrong org.
     ctx = rctx.tenant
-    suggestions: list[str] = []
-    if req.use_memory:
-        try:
-            suggestions = store.retrieve_suggestion_texts(req.request, k=5)
-        except Exception:  # noqa: BLE001 - memory is best-effort
-            suggestions = []
+
+    def fetch_suggestions() -> list[str]:
+        # Deferred into the run (it overlaps build_catalog there) so the
+        # embeddings round trip no longer delays the first response byte.
+        # A FRESH session: this runs on a worker-side thread, and the
+        # request-scoped session belongs to the request thread.
+        if not req.use_memory:
+            return []
+        with session_scope() as db:
+            return MemoryStore(db, ctx=ctx).retrieve_suggestion_texts(req.request, k=5)
 
     def stream():
+        # Every DB read this endpoint needs happened in the handler body, so
+        # give the pooled connection back before the multi-minute run.
+        rctx.release_db()
         q: queue.Queue = queue.Queue()
         holder: dict[str, Any] = {}
 
@@ -262,7 +269,7 @@ def report(req: ReportRequest, rctx: RequestContext = Depends(require_connection
                 holder["result"] = generate_report(
                     req.request,
                     ctx=ctx,
-                    memory_suggestions=suggestions,
+                    memory_suggestions_fn=fetch_suggestions,
                     on_event=on_event,
                 )
             except Exception as exc:  # noqa: BLE001
@@ -273,14 +280,8 @@ def report(req: ReportRequest, rctx: RequestContext = Depends(require_connection
         t = threading.Thread(target=worker, daemon=True)
         t.start()
 
-        if suggestions:
-            yield _ndjson("memory", {"count": len(suggestions), "suggestions": suggestions})
-
-        while True:
-            item = q.get()
-            if item is None:
-                break
-            yield _ndjson(item[0], item[1])
+        for kind, data in _drain(q):
+            yield _ndjson(kind, data)
 
         t.join()
         if "result" in holder:
@@ -313,16 +314,17 @@ def dashboard(req: DashboardRequest, rctx: RequestContext = Depends(require_conn
     if not req.request.strip():
         raise HTTPException(status_code=400, detail="Empty request.")
 
-    store = rctx.store
     ctx = rctx.tenant  # see /api/report: explicit, never a contextvar
-    suggestions: list[str] = []
-    if req.use_memory:
-        try:
-            suggestions = store.retrieve_suggestion_texts(req.request, k=5)
-        except Exception:  # noqa: BLE001 - memory is best-effort
-            suggestions = []
+
+    def fetch_suggestions() -> list[str]:
+        # See /api/report: deferred into the run, fresh session, best-effort.
+        if not req.use_memory:
+            return []
+        with session_scope() as db:
+            return MemoryStore(db, ctx=ctx).retrieve_suggestion_texts(req.request, k=5)
 
     def stream():
+        rctx.release_db()  # see /api/report: reads done, unpin the connection
         q: queue.Queue = queue.Queue()
         holder: dict[str, Any] = {}
 
@@ -334,7 +336,7 @@ def dashboard(req: DashboardRequest, rctx: RequestContext = Depends(require_conn
                 holder["result"] = generate_dashboard(
                     req.request,
                     ctx=ctx,
-                    memory_suggestions=suggestions,
+                    memory_suggestions_fn=fetch_suggestions,
                     on_event=on_event,
                 )
             except Exception as exc:  # noqa: BLE001
@@ -345,14 +347,8 @@ def dashboard(req: DashboardRequest, rctx: RequestContext = Depends(require_conn
         t = threading.Thread(target=worker, daemon=True)
         t.start()
 
-        if suggestions:
-            yield _ndjson("memory", {"count": len(suggestions), "suggestions": suggestions})
-
-        while True:
-            item = q.get()
-            if item is None:
-                break
-            yield _ndjson(item[0], item[1])
+        for kind, data in _drain(q):
+            yield _ndjson(kind, data)
 
         t.join()
         if "result" in holder:
@@ -365,7 +361,7 @@ def dashboard(req: DashboardRequest, rctx: RequestContext = Depends(require_conn
             # generation would also pin a pooled connection for minutes.
             with session_scope() as db:
                 saved = MemoryStore(db, ctx=ctx).save_dashboard(
-                    req.request, res.document, res.queries
+                    req.request, res.document, res.queries, insights=res.insights
                 )
             yield _ndjson(
                 "saved",
@@ -380,20 +376,27 @@ def dashboard(req: DashboardRequest, rctx: RequestContext = Depends(require_conn
 
 @api.post("/dashboards/{dashboard_id}/analyze")
 def analyze_dashboard_endpoint(
-    dashboard_id: int, req: DashboardAnalyzeRequest, rctx: RequestContext = Depends(require_connection)
+    dashboard_id: int, req: DashboardAnalyzeRequest, rctx: RequestContext = Depends(get_request_ctx)
 ) -> dict[str, Any]:
+    # No require_connection: reads only the numbers already on the dashboard.
     store = rctx.store
     ctx = rctx.tenant
     saved = store.get_dashboard(dashboard_id)
     if not saved:
         raise HTTPException(status_code=404, detail="Dashboard not found.")
-    suggestions = (
-        store.retrieve_suggestion_texts(saved.request[:2000], k=3)
-        if req.use_memory else []
-    )
+    suggestions: list[str] = []
+    if req.use_memory:
+        try:
+            suggestions = store.retrieve_suggestion_texts(saved.request[:2000], k=3)
+        except Exception:  # noqa: BLE001 - memory is best-effort
+            suggestions = []
     try:
         analysis = analyze_dashboard(
-            saved.document, ctx=ctx, focus=req.focus, memory_suggestions=suggestions
+            saved.document,
+            ctx=ctx,
+            focus=req.focus,
+            memory_suggestions=suggestions,
+            queries=saved.queries,
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=str(exc))
@@ -423,6 +426,7 @@ def get_dashboard(dashboard_id: int, rctx: RequestContext = Depends(get_request_
         "title": d.title,
         "document": d.document.to_dict(),
         "queries": d.queries,
+        "insights": d.insights,
         "analysis": d.analysis,
         "created_at": d.created_at,
     }
@@ -450,6 +454,7 @@ def ask(report_id: int, req: AskRequest, rctx: RequestContext = Depends(require_
     ]
 
     def stream():
+        rctx.release_db()  # see /api/report: reads done, unpin the connection
         q: queue.Queue = queue.Queue()
         holder: dict[str, Any] = {}
 
@@ -478,11 +483,8 @@ def ask(report_id: int, req: AskRequest, rctx: RequestContext = Depends(require_
         t = threading.Thread(target=worker, daemon=True)
         t.start()
 
-        while True:
-            item = q.get()
-            if item is None:
-                break
-            yield _ndjson(item[0], item[1])
+        for kind, data in _drain(q):
+            yield _ndjson(kind, data)
 
         t.join()
         if "result" in holder:
@@ -515,20 +517,29 @@ def ask(report_id: int, req: AskRequest, rctx: RequestContext = Depends(require_
 # --- analysis ---
 
 @api.post("/analyze")
-def analyze(req: AnalyzeRequest, rctx: RequestContext = Depends(require_connection)) -> dict[str, Any]:
+def analyze(req: AnalyzeRequest, rctx: RequestContext = Depends(get_request_ctx)) -> dict[str, Any]:
+    # No require_connection: this runs zero SQL (it critiques text it is
+    # given), so a connectionless org can still analyze a pasted report —
+    # matching the rule that only warehouse-reaching endpoints gate on one.
     store = rctx.store
     ctx = rctx.tenant
+    queries = None
     if req.report_id is not None:
         saved = store.get_report(req.report_id)
         if not saved:
             raise HTTPException(status_code=404, detail="Report not found.")
-        text, source = saved.markdown, "own"
+        text, source, queries = saved.markdown, "own", saved.queries
     elif req.text and req.text.strip():
         text, source = req.text, "external"
     else:
         raise HTTPException(status_code=400, detail="Provide report_id or text.")
 
-    suggestions = store.retrieve_suggestion_texts(text[:2000], k=3) if req.use_memory else []
+    suggestions: list[str] = []
+    if req.use_memory:
+        try:
+            suggestions = store.retrieve_suggestion_texts(text[:2000], k=3)
+        except Exception:  # noqa: BLE001 - memory is best-effort
+            suggestions = []
     try:
         analysis = analyze_report(
             text,
@@ -536,6 +547,7 @@ def analyze(req: AnalyzeRequest, rctx: RequestContext = Depends(require_connecti
             source=source,
             focus=req.focus,
             memory_suggestions=suggestions,
+            queries=queries,
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=str(exc))

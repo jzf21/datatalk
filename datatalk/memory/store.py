@@ -76,6 +76,7 @@ class SavedDashboard:
     created_at: str
     document: Document = field(default_factory=Document)
     queries: list[dict[str, Any]] = field(default_factory=list)
+    insights: dict[str, Any] = field(default_factory=dict)
     analysis: str | None = None
     created_by_user_id: UUID | None = None
 
@@ -331,8 +332,10 @@ class MemoryStore:
         document: Document,
         queries: list[dict[str, Any]] | None = None,
         title: str | None = None,
+        insights: dict[str, Any] | None = None,
     ) -> SavedDashboard:
         queries = queries or []
+        insights = insights or {}
         title = title or self._derive_title(request)
         row = models.Dashboard(
             org_id=self.org_id,
@@ -341,6 +344,7 @@ class MemoryStore:
             title=title,
             document=document.to_dict(),
             queries=queries,
+            insights=insights,
             analysis=None,
         )
         self._db.add(row)
@@ -352,6 +356,7 @@ class MemoryStore:
             created_at=_iso(row.created_at),
             document=document,
             queries=queries,
+            insights=insights,
             analysis=None,
             created_by_user_id=row.created_by_user_id,
         )
@@ -365,6 +370,7 @@ class MemoryStore:
             created_at=_iso(r.created_at),
             document=Document.from_dict(r.document or {}),
             queries=list(r.queries or []),
+            insights=dict(r.insights or {}),
             analysis=r.analysis,
             created_by_user_id=r.created_by_user_id,
         )

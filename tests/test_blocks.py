@@ -8,9 +8,11 @@ from datatalk.agent.blocks import (
     Row,
     Stat,
     Table,
+    count_data_blocks,
     document_to_text,
     materialize,
     parse_json_object,
+    validate_references,
 )
 from datatalk.agent.executor import QueryResult
 
@@ -297,3 +299,210 @@ def test_materialize_clamps_top_level_stat_width():
     stat = out.blocks[0]
     assert isinstance(stat, Stat)
     assert stat.width == 12
+
+
+def test_materialize_keeps_top_level_chart_and_table_width():
+    """A top-level chart/table must keep its grid width.
+
+    ``materialize`` only re-applies width to a ``Row``'s children, so a block
+    laid out at the top level of the grid depended on its own materializer
+    carrying the width across -- and chart and table silently dropped it,
+    rendering full-bleed no matter what the author asked for.
+    """
+    ds = _dataset()
+    out = materialize(
+        Document(blocks=[
+            Chart(dataset_id="q1", chart_type="line", x_col="month",
+                  series_cols=["issues"], width=8),
+            Table(dataset_id="q1", columns=["month"], width=4),
+        ]),
+        {"q1": ds},
+    )
+    assert out.blocks[0].width == 8
+    assert out.blocks[1].width == 4
+
+
+def test_materialize_clamps_top_level_chart_and_table_width():
+    ds = _dataset()
+    out = materialize(
+        Document(blocks=[
+            Chart(dataset_id="q1", chart_type="line", x_col="month",
+                  series_cols=["issues"], width=99),
+            Table(dataset_id="q1", width=0),
+        ]),
+        {"q1": ds},
+    )
+    assert out.blocks[0].width == 12
+    assert out.blocks[1].width == 1
+
+
+# --- reference validation ----------------------------------------------------
+
+def _mixed_document():
+    """One document covering every way a reference can be good or bad."""
+    return Document(blocks=[
+        Heading(text="Title"),
+        Paragraph(text="prose"),
+        Row(children=[
+            Stat(dataset_id="q1", value_col="issues", label="ok"),
+            Stat(dataset_id="q1", value_col="ghost", label="bad column"),
+            Stat(dataset_id="nope", value_col="issues", label="bad dataset"),
+            Stat(dataset_id="q1", value_col="issues", delta_col="ghost", label="bad delta"),
+            Stat(dataset_id="q1", value_col="issues", row_index=99, label="bad row"),
+        ]),
+        Chart(dataset_id="q1", chart_type="line", x_col="month", series_cols=["issues"]),
+        Chart(dataset_id="q1", chart_type="sunburst", x_col="month", series_cols=["issues"]),
+        Chart(dataset_id="q1", chart_type="bar", x_col="month", series_cols=["ghost"]),
+        Chart(dataset_id="q1", chart_type="bar", x_col="", series_cols=[]),
+        Table(dataset_id="q1", columns=["month", "issues"]),
+        Table(dataset_id="q1", columns=["ghost"]),
+        Table(dataset_id="nope"),
+    ])
+
+
+def test_validate_references_agrees_with_materialize():
+    """Validation and materialization must never disagree.
+
+    They share the ``_check_*`` predicates precisely so a repair turn is offered
+    for exactly the blocks that would otherwise degrade to a note -- no more
+    (the author gets sent back over nothing) and no fewer (a note ships).
+    """
+    ds = {"q1": _dataset()}
+    doc = _mixed_document()
+
+    errors = validate_references(doc, ds)
+    out = materialize(doc, ds)
+
+    flagged = {e.path for e in errors}
+
+    def degraded(path, block):
+        return {path} if isinstance(block, Paragraph) and block.text.startswith("_") else set()
+
+    actual = set()
+    for i, b in enumerate(out.blocks):
+        if isinstance(b, Row):
+            for j, c in enumerate(b.children):
+                actual |= degraded(f"blocks[{i}].children[{j}]", c)
+        else:
+            actual |= degraded(f"blocks[{i}]", b)
+
+    assert flagged == actual
+    assert len(errors) == 9  # 4 bad stats + 3 bad charts + 2 bad tables
+
+
+def test_validate_references_is_clean_for_a_good_document():
+    ds = {"q1": _dataset()}
+    doc = Document(blocks=[
+        Heading(text="T"),
+        Row(children=[Stat(dataset_id="q1", value_col="issues", label="ok")]),
+        Chart(dataset_id="q1", chart_type="bar", x_col="month", series_cols=["issues"]),
+        Table(dataset_id="q1"),
+    ])
+    assert validate_references(doc, ds) == []
+
+
+def test_validate_references_ignores_materialized_blocks():
+    """Only authoring blocks reference anything; materialized ones are done."""
+    ds = {"q1": _dataset()}
+    out = materialize(Document(blocks=[
+        Table(dataset_id="q1", columns=["month"])]), ds)
+    assert validate_references(out, {}) == []
+
+
+def test_count_data_blocks_ignores_prose_and_notes():
+    """Zero data blocks is what 'the dashboard is empty' actually means.
+
+    A document can be non-empty and still show nothing: a page of degradation
+    notes has blocks but no data, and used to be saved as a success.
+    """
+    ds = {"q1": _dataset()}
+    notes_only = materialize(Document(blocks=[
+        Heading(text="T"),
+        Paragraph(text="prose"),
+        Table(dataset_id="ghost"),
+    ]), ds)
+    assert count_data_blocks(notes_only) == 0
+
+    with_data = materialize(Document(blocks=[
+        Heading(text="T"),
+        Row(children=[
+            Stat(dataset_id="q1", value_col="issues", label="ok"),
+            Stat(dataset_id="ghost", value_col="issues", label="bad"),
+        ]),
+        Table(dataset_id="q1"),
+    ]), ds)
+    assert count_data_blocks(with_data) == 2
+
+
+# --- presentation hints (unit / stacked / direction / horizontal_bar) ---------
+
+def test_presentation_hints_round_trip():
+    doc = Document(blocks=[
+        Chart(chart_type="horizontal_bar", dataset_id="q1", x_col="month",
+              series_cols=["issues"], unit="ratio", stacked=True),
+        Stat(dataset_id="q1", value_col="issues", label="Churn",
+             direction="down_is_good"),
+    ])
+    restored = Document.from_dict(doc.to_dict())
+    assert restored.to_dict() == doc.to_dict()
+    assert restored.blocks[0].unit == "ratio"
+    assert restored.blocks[0].stacked is True
+    assert restored.blocks[1].direction == "down_is_good"
+
+
+def test_old_documents_serialize_byte_identically():
+    """A document authored before the hint fields existed must not grow keys."""
+    old = {
+        "blocks": [
+            {"type": "chart", "chart_type": "bar", "title": "T",
+             "dataset_id": "q1", "x_col": "month", "series_cols": ["issues"]},
+            {"type": "stat", "label": "V", "dataset_id": "q1",
+             "value_col": "issues"},
+        ]
+    }
+    assert Document.from_dict(old).to_dict() == old
+
+
+def test_materialize_carries_valid_hints_through():
+    doc = Document(blocks=[
+        Chart(chart_type="horizontal_bar", dataset_id="q1", x_col="month",
+              series_cols=["issues"], unit="percent", stacked=True),
+        Stat(dataset_id="q1", value_col="issues", label="Churn",
+             direction="down_is_good"),
+    ])
+    out = materialize(doc, {"q1": _dataset()})
+    chart, stat = out.blocks
+    assert isinstance(chart, Chart)
+    assert chart.chart_type == "horizontal_bar"  # a real type, not a note
+    assert chart.unit == "percent"
+    assert chart.stacked is True
+    assert isinstance(stat, Stat)
+    assert stat.direction == "down_is_good"
+
+
+def test_materialize_normalizes_junk_hints_silently():
+    """A bad hint costs the hint, never the block."""
+    doc = Document(blocks=[
+        Chart(chart_type="bar", dataset_id="q1", x_col="month",
+              series_cols=["issues"], unit="furlongs", stacked=0),
+        Stat(dataset_id="q1", value_col="issues", label="V",
+             direction="sideways"),
+    ])
+    out = materialize(doc, {"q1": _dataset()})
+    chart, stat = out.blocks
+    assert isinstance(chart, Chart)
+    assert chart.unit is None
+    assert chart.stacked is None
+    assert isinstance(stat, Stat)
+    assert stat.direction is None
+
+
+def test_validate_references_ignores_bad_hints():
+    """The repair budget is for lost content, not cosmetics."""
+    doc = Document(blocks=[
+        Chart(chart_type="bar", dataset_id="q1", x_col="month",
+              series_cols=["issues"], unit="furlongs"),
+        Stat(dataset_id="q1", value_col="issues", label="V",
+             direction="sideways"),
+    ])
+    assert validate_references(doc, {"q1": _dataset()}) == []

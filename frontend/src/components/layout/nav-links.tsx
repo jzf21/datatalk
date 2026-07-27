@@ -6,6 +6,7 @@ import {
   BookOpen,
   FileText,
   LayoutDashboard,
+  ListFilter,
   Sparkles,
   ScrollText,
   Cable,
@@ -20,6 +21,7 @@ const LINKS: { href: string; label: string; icon: LucideIcon }[] = [
   { href: "/analyze", label: "Analyze", icon: Sparkles },
   { href: "/memory", label: "House rules", icon: ScrollText },
   { href: "/settings/connection", label: "Connection", icon: Cable },
+  { href: "/settings/scope", label: "Data scope", icon: ListFilter },
   { href: "/settings/context", label: "Data context", icon: BookOpen },
 ];
 

@@ -3,7 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { BookOpen, Database, Plus, Trash2 } from "lucide-react";
+import { BookOpen, Database, ListFilter, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { PageBody, PageHeader } from "@/components/layout/page-header";
@@ -23,6 +23,7 @@ import {
   type ConnectionInput,
   type ConnectionPublic,
 } from "@/lib/api/auth";
+import { parseScope, scopeSummary } from "@/lib/connections/scope";
 import { ApiError } from "@/lib/api/client";
 import { qk } from "@/lib/api/queries";
 import { Badge } from "@/components/ui/badge";
@@ -219,6 +220,13 @@ export default function ConnectionPage() {
                         </div>
                         <p className="mt-0.5 truncate text-[12px] text-ink-tertiary">
                           {c.user}@{c.host}:{c.port}/{c.database}
+                          {" · "}
+                          {scopeSummary(
+                            parseScope(
+                              c.introspect_databases as string[] | undefined,
+                              c.introspect_tables as string[] | undefined,
+                            ),
+                          )}
                         </p>
                         {c.description && (
                           <p className="mt-1 text-[12px] text-ink-secondary">
@@ -265,12 +273,20 @@ export default function ConnectionPage() {
                   Add source
                 </Button>
                 {connections.length > 0 && (
-                  <Button variant="ghost" asChild>
-                    <Link href="/settings/context">
-                      <BookOpen className="size-3.5" aria-hidden />
-                      Document this data
-                    </Link>
-                  </Button>
+                  <>
+                    <Button variant="ghost" asChild>
+                      <Link href="/settings/scope">
+                        <ListFilter className="size-3.5" aria-hidden />
+                        Choose what it sees
+                      </Link>
+                    </Button>
+                    <Button variant="ghost" asChild>
+                      <Link href="/settings/context">
+                        <BookOpen className="size-3.5" aria-hidden />
+                        Document this data
+                      </Link>
+                    </Button>
+                  </>
                 )}
               </div>
             )}

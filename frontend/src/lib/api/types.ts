@@ -11,7 +11,14 @@
 
 // --- blocks ----------------------------------------------------------------
 
-export type ChartType = "bar" | "line" | "area" | "pie";
+export type ChartType = "bar" | "horizontal_bar" | "line" | "area" | "pie";
+
+/** Presentation hint: how every series of a chart is formatted. `ratio` means
+ *  the values are 0–1 fractions to display as percentages. */
+export type ChartUnit = "percent" | "ratio" | "currency" | "duration" | "count";
+
+/** Which delta direction is an improvement. Absent means `up_is_good`. */
+export type StatDirection = "up_is_good" | "down_is_good" | "neutral";
 
 /** Present on materialized blocks so a figure can cite the query behind it. */
 interface Cited {
@@ -48,6 +55,10 @@ export interface ChartBlockData extends Cited {
   chart_type: ChartType;
   /** Always present after materialization, but may be an empty string. */
   title: string;
+  /** Model-declared unit shared by every series; overrides name inference. */
+  unit?: ChartUnit;
+  /** Series are parts of a whole (bar/area only). */
+  stacked?: boolean;
   x: { label: string; values: CellValue[] };
   series: ChartSeries[];
 }
@@ -56,6 +67,7 @@ export interface StatBlock extends Cited {
   type: "stat";
   label: string;
   unit?: string;
+  direction?: StatDirection;
   value?: CellValue;
   delta?: number;
   /** null when the prior value was 0 or either value was non-numeric. */
@@ -146,9 +158,30 @@ export interface DashboardSummary {
   created_at: string;
 }
 
+/** One structured finding from the insight pass (all fields model-written,
+ * so every one is optional in practice). */
+export interface Insight {
+  dataset_id?: string;
+  kind?: string;
+  finding?: string;
+  importance?: number;
+  presentation_hint?: string;
+}
+
+/** The insight pass's full output: findings plus which datasets should lead
+ * the grid, which were dropped, and what the data could not answer. */
+export interface InsightSet {
+  insights?: Insight[];
+  lead?: string[];
+  drop?: string[];
+  gaps?: string[];
+}
+
 export interface DashboardDetail extends DashboardSummary {
   document: BlockDocument;
   queries: CapturedQuery[];
+  /** Structured findings from the insight pass; {} for pre-insight saves. */
+  insights: InsightSet;
   /** Markdown, or null when it has never been analyzed. */
   analysis: string | null;
 }
@@ -170,15 +203,29 @@ export interface AnalyzeResponse {
 /** Every line is `{"kind": ..., "data": {...}}`. */
 export type RunEvent =
   | { kind: "memory"; data: { count: number; suggestions: string[] } }
-  | { kind: "status"; data: { message: string } }
+  // step/max_steps arrive on the analyst loop's turn announcements. A step is
+  // one assistant *turn*, which under batching runs several queries.
+  | { kind: "status"; data: { message: string; step?: number; max_steps?: number } }
   | { kind: "plan"; data: { sections: PlanSection[] } }
-  | { kind: "sql"; data: { sql: string } }
+  // `query_id` correlates sql/result/error within a turn: batched queries run
+  // concurrently on the server, so "most recent running step" is ambiguous.
+  | { kind: "sql"; data: { sql: string; query_id?: string; source?: string | null } }
   | {
       kind: "result";
-      data: { dataset_id: string; row_count: number; columns: string[] };
+      data: {
+        dataset_id: string;
+        row_count: number;
+        columns: string[];
+        query_id?: string;
+        source?: string;
+      };
     }
   // Used for BOTH recoverable retries and fatal worker crashes. See isFatal().
-  | { kind: "error"; data: { message: string } }
+  | { kind: "error"; data: { message: string; query_id?: string } }
+  // Heartbeat while a long LLM call is in flight; carries nothing.
+  | { kind: "ping"; data: Record<string, never> }
+  // Dashboard runs only: the insight pass's structured findings.
+  | { kind: "insights"; data: InsightSet }
   | { kind: "report"; data: { document: BlockDocument } }
   | { kind: "dashboard"; data: { document: BlockDocument } }
   | {

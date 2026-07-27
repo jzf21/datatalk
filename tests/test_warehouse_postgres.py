@@ -134,6 +134,102 @@ def test_exclude_patterns_drop_matching_tables(warehouse_spec):
         wh.close()
 
 
+# --- the per-namespace table allowlist ----------------------------------------
+
+
+def _scoped(warehouse_spec, **overrides):
+    import dataclasses
+
+    return create(dataclasses.replace(warehouse_spec, **overrides))
+
+
+def test_a_table_allowlist_narrows_its_namespace(warehouse_spec):
+    wh = _scoped(warehouse_spec, introspect_tables=(f"{SCHEMA}.events",))
+    try:
+        assert {t.name for t in wh.introspect()} == {"events"}
+    finally:
+        wh.close()
+
+
+def test_a_namespace_with_no_entries_still_shows_every_table(warehouse_spec):
+    """The rule the whole feature rests on: absence means all, not none.
+
+    Naming tables in one namespace must not silently empty a sibling, or
+    selecting three tables from one database would blank out every other one.
+    """
+    wh = _scoped(warehouse_spec, introspect_tables=("other_schema.thing",))
+    try:
+        assert {t.name for t in wh.introspect()} == {"events", "events_backup"}
+    finally:
+        wh.close()
+
+
+def test_an_explicit_selection_survives_a_matching_exclude_pattern(warehouse_spec):
+    """A ticked table must not vanish because of a pattern set elsewhere."""
+    wh = _scoped(
+        warehouse_spec,
+        introspect_tables=(f"{SCHEMA}.events_backup",),
+        introspect_exclude_patterns=("backup",),
+    )
+    try:
+        assert {t.name for t in wh.introspect()} == {"events_backup"}
+    finally:
+        wh.close()
+
+
+def test_the_table_allowlist_is_case_insensitive(warehouse_spec):
+    wh = _scoped(warehouse_spec, introspect_tables=(f"{SCHEMA.upper()}.EVENTS",))
+    try:
+        assert {t.name for t in wh.introspect()} == {"events"}
+    finally:
+        wh.close()
+
+
+def test_malformed_allowlist_entries_are_ignored(warehouse_spec):
+    """An entry with no namespace cannot be honoured, so it must not narrow."""
+    wh = _scoped(warehouse_spec, introspect_tables=("events", f"{SCHEMA}."))
+    try:
+        assert {t.name for t in wh.introspect()} == {"events", "events_backup"}
+    finally:
+        wh.close()
+
+
+# --- discovery ----------------------------------------------------------------
+
+
+def test_discover_ignores_the_scope_it_is_used_to_set(warehouse_spec):
+    """The picker has to show what the scope excludes, or it can only narrow."""
+    wh = _scoped(warehouse_spec, introspect_tables=(f"{SCHEMA}.events",))
+    try:
+        namespaces, truncated = wh.discover()
+        assert not truncated
+        by_name = {ns.namespace: ns for ns in namespaces}
+        # `introspect_databases` is set to wh_test, yet public is still listed.
+        assert "public" in by_name
+        assert {t.name for t in by_name[SCHEMA].tables} == {
+            "events",
+            "events_backup",
+        }
+    finally:
+        wh.close()
+
+
+def test_discover_fetches_no_columns_or_samples(warehouse):
+    """It is a browse, not an introspection: one catalog query per namespace."""
+    namespaces, _ = warehouse.discover()
+    scoped = next(ns for ns in namespaces if ns.namespace == SCHEMA)
+    events = next(t for t in scoped.tables if t.name == "events")
+    assert events.columns == []
+    assert events.sample_rows == []
+    assert events.comment == "product events"
+
+
+def test_discover_reports_truncation(warehouse):
+    namespaces, truncated = warehouse.discover(max_tables=1)
+    assert truncated
+    assert sum(len(ns.tables) for ns in namespaces) == 1
+
+
 # --- querying -----------------------------------------------------------------
 
 
@@ -264,8 +360,11 @@ def test_the_catalog_renders_a_postgres_source(warehouse_spec):
     ctx = _ctx(warehouse_spec)
     text_out = catalog.build_catalog(ctx)
 
-    assert "SOURCE pg [postgres]" in text_out
+    assert 'SOURCE "pg" [postgres]' in text_out
     assert f"{SCHEMA}.events (id, kind, amount, at)" in text_out
+    # The scope line says "schema" on Postgres, where a namespace is a schema
+    # and not a database.
+    assert f"scopes this source to the schema {SCHEMA}" in text_out
     # The dialect hint travels with the catalog, so prompts stay engine-neutral.
     assert "PostgreSQL dialect" in text_out
     assert "schema.table" in text_out

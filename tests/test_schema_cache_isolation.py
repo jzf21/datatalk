@@ -132,6 +132,24 @@ def test_same_org_different_introspection_settings_are_separate_entries():
     assert len(catalog._SCHEMA_CACHE) == 2
 
 
+def test_same_org_different_table_scope_are_separate_entries():
+    """A narrowed table selection is as much a schema change as a narrowed
+    database one -- sharing an entry would serve tables the scope excludes."""
+    org_id = uuid4()
+    broad = _ctx_for(org_id, {"main": _wh("shared_table", "r")})
+    narrow = _ctx_for(
+        org_id,
+        {"main": _wh("shared_table", "r")},
+        specs={"main": _spec(introspect_tables=("db.only_this_table",))},
+    )
+
+    catalog.build_catalog(broad)
+    catalog.build_catalog(narrow)
+
+    assert broad.fingerprint != narrow.fingerprint
+    assert len(catalog._SCHEMA_CACHE) == 2
+
+
 def test_changing_credentials_invalidates_by_fingerprint():
     """Rotating a password must not serve the schema fetched with the old one."""
     org_id = uuid4()
@@ -155,8 +173,8 @@ def test_each_source_is_cached_independently():
 
     context = catalog.build_catalog(ctx)
 
-    assert "SOURCE events [clickhouse]" in context
-    assert "SOURCE billing [clickhouse]" in context
+    assert 'SOURCE "events" [clickhouse]' in context
+    assert 'SOURCE "billing" [clickhouse]' in context
     assert "pageviews" in context and "invoices" in context
     assert len(catalog._SCHEMA_CACHE) == 2
 

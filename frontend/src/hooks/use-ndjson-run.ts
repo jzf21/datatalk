@@ -6,14 +6,18 @@ import { describeNetworkError } from "@/lib/api/client";
 import type {
   BlockDocument,
   CapturedQuery,
+  InsightSet,
   PlanSection,
   RunEvent,
 } from "@/lib/api/types";
 
 export interface QueryStep {
+  /** Correlates this step with its result/error events within a turn. */
+  queryId?: string;
   /** Assigned on the `result` event; undefined while the query is in flight. */
   datasetId?: string;
   sql: string;
+  source?: string | null;
   rowCount?: number;
   columns?: string[];
   /** Recoverable DB errors the model was fed back and retried after. */
@@ -25,9 +29,14 @@ export interface RunState {
   phase: "idle" | "streaming" | "done" | "failed" | "stopped";
   request: string;
   status: string | null;
+  /** Analyst-loop turn counter, straight from the backend's status events. */
+  step: number | null;
+  maxSteps: number | null;
   memory: string[];
   plan: PlanSection[];
   steps: QueryStep[];
+  /** Structured findings from the insight pass (dashboard runs only). */
+  insights: InsightSet | null;
   document: BlockDocument | null;
   queries: CapturedQuery[];
   savedId: number | null;
@@ -35,13 +44,16 @@ export interface RunState {
   fatal: string | null;
 }
 
-const EMPTY: RunState = {
+export const EMPTY: RunState = {
   phase: "idle",
   request: "",
   status: null,
+  step: null,
+  maxSteps: null,
   memory: [],
   plan: [],
   steps: [],
+  insights: null,
   document: null,
   queries: [],
   savedId: null,
@@ -75,13 +87,31 @@ function reducer(state: RunState, action: Action): RunState {
   }
 }
 
-function applyEvent(state: RunState, event: RunEvent): RunState {
+/** Index of the step a result/error event belongs to: match the in-flight step
+ * by query_id when the event carries one (batched queries finish in any
+ * order), else the most recent in-flight step (older backends). */
+function stepIndexFor(steps: QueryStep[], queryId: string | undefined): number {
+  let lastRunning = -1;
+  for (let i = steps.length - 1; i >= 0; i--) {
+    if (steps[i].state !== "running") continue;
+    if (queryId && steps[i].queryId === queryId) return i;
+    if (lastRunning < 0) lastRunning = i;
+  }
+  return lastRunning;
+}
+
+export function applyEvent(state: RunState, event: RunEvent): RunState {
   switch (event.kind) {
     case "memory":
       return { ...state, memory: event.data.suggestions ?? [] };
 
     case "status":
-      return { ...state, status: event.data.message };
+      return {
+        ...state,
+        status: event.data.message,
+        step: event.data.step ?? state.step,
+        maxSteps: event.data.max_steps ?? state.maxSteps,
+      };
 
     case "plan":
       return { ...state, plan: event.data.sections ?? [] };
@@ -91,24 +121,31 @@ function applyEvent(state: RunState, event: RunEvent): RunState {
         ...state,
         steps: [
           ...state.steps,
-          { sql: event.data.sql, retries: [], state: "running" },
+          {
+            queryId: event.data.query_id,
+            sql: event.data.sql,
+            source: event.data.source,
+            retries: [],
+            state: "running",
+          },
         ],
       };
 
     case "result": {
-      // Resolve the most recent in-flight step in place.
+      // Batched queries run concurrently on the server, so results can land in
+      // any order: resolve by query_id when the event carries one, falling back
+      // to the most recent in-flight step for older backends.
       const steps = [...state.steps];
-      for (let i = steps.length - 1; i >= 0; i--) {
-        if (steps[i].state === "running") {
-          steps[i] = {
-            ...steps[i],
-            datasetId: event.data.dataset_id,
-            rowCount: event.data.row_count,
-            columns: event.data.columns,
-            state: "done",
-          };
-          break;
-        }
+      const target = stepIndexFor(steps, event.data.query_id);
+      if (target >= 0) {
+        steps[target] = {
+          ...steps[target],
+          datasetId: event.data.dataset_id,
+          source: event.data.source ?? steps[target].source,
+          rowCount: event.data.row_count,
+          columns: event.data.columns,
+          state: "done",
+        };
       }
       return { ...state, steps };
     }
@@ -119,15 +156,20 @@ function applyEvent(state: RunState, event: RunEvent): RunState {
       // worker has stopped -- with no document produced -- is fatal, and that
       // one is decided by the caller when the stream ends.
       const steps = [...state.steps];
-      const last = steps.length - 1;
-      if (last >= 0) {
-        steps[last] = {
-          ...steps[last],
-          retries: [...steps[last].retries, event.data.message],
+      const byId = stepIndexFor(steps, event.data.query_id);
+      const target = byId >= 0 && event.data.query_id ? byId : steps.length - 1;
+      if (target >= 0) {
+        steps[target] = {
+          ...steps[target],
+          retries: [...steps[target].retries, event.data.message],
         };
         return { ...state, steps };
       }
-      return { ...state, fatal: event.data.message };
+      // No step to hang it on -- an error before any SQL ran. Declaring it
+      // fatal here would contradict the rule above: a run that captured nothing
+      // still produces a document explaining why, and that is not a failure.
+      // The stream-end caller tracks the last error and decides.
+      return { ...state, status: event.data.message };
     }
 
     case "report":
@@ -150,8 +192,18 @@ function applyEvent(state: RunState, event: RunEvent): RunState {
         savedId: event.data.report_id ?? event.data.dashboard_id ?? null,
       };
 
+    case "insights":
+      // The findings arrive before the author call, so the panel gives the
+      // user something real to read during the longest silent stretch.
+      return { ...state, insights: event.data };
+
     case "done":
       return { ...state, phase: "done", status: null };
+
+    default:
+      // A backend newer than this bundle may stream kinds we cannot render.
+      // Ignoring one costs a progress nicety; crashing the reducer costs the run.
+      return state;
   }
 }
 

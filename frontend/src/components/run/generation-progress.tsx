@@ -8,9 +8,6 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { QueryCard } from "./query-card";
 
-/** `max_steps` in sqlloop.py -- an honest counter beats a fake percentage. */
-const MAX_STEPS = 8;
-
 /**
  * The run sheet. The old UI showed a <pre> tail; this turns the wait into
  * something readable, and -- crucially -- something the user can judge and
@@ -26,6 +23,11 @@ export function GenerationProgress({
   onRefine: () => void;
 }) {
   const streaming = state.phase === "streaming";
+  // The backend announces every analyst turn with step/max_steps, so the
+  // counter is its truth, not a hardcoded copy of a server-side constant. A
+  // step is one assistant turn; a batched turn runs several queries, which is
+  // why counting `sql` events here used to saturate the counter early.
+  const showCounter = state.step !== null && state.maxSteps !== null;
 
   return (
     <div className="space-y-6">
@@ -68,9 +70,9 @@ export function GenerationProgress({
         <div>
           <div className="mb-2 flex items-baseline justify-between">
             <h2 className="label-caps text-ink-tertiary">Run log</h2>
-            {streaming && (
+            {streaming && showCounter && (
               <span className="cite text-ink-tertiary">
-                step {Math.min(state.steps.length, MAX_STEPS)} / {MAX_STEPS}
+                step {state.step} / {state.maxSteps}
               </span>
             )}
           </div>

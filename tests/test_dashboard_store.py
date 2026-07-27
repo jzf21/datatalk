@@ -57,3 +57,19 @@ def test_list_dashboards_newest_first(store):
     assert ids[0] == b.id and ids[1] == a.id
 
 
+
+
+def test_insights_round_trip_with_the_dashboard(store):
+    insights = {
+        "insights": [{"dataset_id": "q1", "finding": "Revenue fell", "importance": 3}],
+        "lead": ["q1"],
+        "gaps": ["No cost data"],
+    }
+    saved = store.save_dashboard("revenue", _dashboard_doc(), [], insights=insights)
+
+    fetched = store.get_dashboard(saved.id)
+    assert fetched is not None
+    assert fetched.insights == insights
+    # And an insight-less save reads back as {}, not None.
+    plain = store.save_dashboard("plain", _dashboard_doc(), [])
+    assert store.get_dashboard(plain.id).insights == {}

@@ -20,6 +20,7 @@ built once per request and handed to agent worker threads:
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
@@ -107,6 +108,12 @@ class WarehouseSpec:
     # is a *schema* allowlist. Both render as ``<namespace>.<table>``, which is
     # what the model has to type either way.
     introspect_databases: tuple[str, ...] = ()
+    # Qualified ``namespace.table`` allowlist, scoped *per namespace*: a
+    # namespace named here shows only the tables named here, a namespace absent
+    # from it shows all of its tables. That way "the whole billing database" and
+    # "three tables from analytics" are both expressible in one flat list, and
+    # ticking a whole database keeps picking up tables created later.
+    introspect_tables: tuple[str, ...] = ()
     introspect_exclude_patterns: tuple[str, ...] = ()
     introspect_sample_rows: int = 3
     introspect_max_tables: int = 0
@@ -143,6 +150,18 @@ class Table:
     @property
     def qualified_name(self) -> str:
         return f"{self.database}.{self.name}"
+
+
+@dataclass
+class NamespaceTables:
+    """One namespace and its tables, as returned by :meth:`Warehouse.discover`.
+
+    The tables carry no columns and no sample rows -- discovery is a browse of
+    what exists, not an introspection of what it holds.
+    """
+
+    namespace: str
+    tables: list[Table] = field(default_factory=list)
 
 
 @dataclass
@@ -188,6 +207,14 @@ class Warehouse(Protocol):
         """Discover user tables, honouring the spec's allowlist and caps."""
         ...
 
+    def discover(self, *, max_tables: int = 2000) -> tuple[list[NamespaceTables], bool]:
+        """Browse every namespace and table name, ignoring the spec's allowlists.
+
+        Returns the namespaces and whether ``max_tables`` truncated the walk.
+        Used by the scope picker, which has to show what the scope excludes.
+        """
+        ...
+
     def close(self) -> None:
         ...
 
@@ -227,21 +254,89 @@ class BaseWarehouse:
             names = [n for n in names if n in allow]
         return names
 
+    def _allowed_tables(self) -> dict[str, set[str]]:
+        """``{namespace: {table, ...}}`` from the spec, all lowercased.
+
+        A namespace missing from the result has no explicit selection, which
+        means every one of its tables is in scope -- not that none of them are.
+        Entries without a ``.`` are dropped rather than guessed at.
+        """
+        by_ns: dict[str, set[str]] = {}
+        for entry in self.spec.introspect_tables:
+            namespace, sep, table = entry.partition(".")
+            if not sep or not namespace.strip() or not table.strip():
+                continue
+            by_ns.setdefault(namespace.strip().lower(), set()).add(
+                table.strip().lower()
+            )
+        return by_ns
+
     def introspect(self, *, with_samples: bool = True) -> list[Table]:
+        """Discover in-scope tables, narrowing in three documented steps.
+
+        The namespace allowlist runs first, then the per-namespace table
+        allowlist, then the exclude patterns. An explicit table selection wins
+        over an exclude pattern: someone who ticked a table in the UI must not
+        have it silently removed by a substring rule they cannot see from there.
+        ``introspect_max_tables`` still applies last, as a hard ceiling.
+
+        Filtering is cheap and deterministic, so the candidate list is settled
+        first and the two catalog round trips per table (columns + samples) run
+        on a small pool — a wide warehouse would otherwise pay for them one
+        table at a time. Bounded by the Postgres adapter's pool size; the
+        ClickHouse client is built for concurrent threads. Any table failing to
+        introspect still fails the whole source, exactly as it did serially.
+        """
         exclude = [p.lower() for p in self.spec.introspect_exclude_patterns if p]
+        selected = self._allowed_tables()
         cap = self.spec.introspect_max_tables
 
-        tables: list[Table] = []
+        candidates: list[tuple[str, Table]] = []
         for namespace in self._allowed_namespaces():
+            wanted = selected.get(namespace.lower())
             for table in self._fetch_tables(namespace):
-                if exclude and any(p in table.name.lower() for p in exclude):
+                if wanted is not None:
+                    if table.name.lower() not in wanted:
+                        continue
+                elif exclude and any(p in table.name.lower() for p in exclude):
                     continue
-                table.columns = self._fetch_columns(namespace, table.name)
-                if with_samples and self.spec.introspect_sample_rows > 0:
-                    table.sample_rows = self._fetch_sample_rows(
-                        namespace, table.name, self.spec.introspect_sample_rows
-                    )
-                tables.append(table)
-                if cap and len(tables) >= cap:
-                    return tables
-        return tables
+                candidates.append((namespace, table))
+                if cap and len(candidates) >= cap:
+                    break
+            if cap and len(candidates) >= cap:
+                break
+
+        def fill(namespace: str, table: Table) -> Table:
+            table.columns = self._fetch_columns(namespace, table.name)
+            if with_samples and self.spec.introspect_sample_rows > 0:
+                table.sample_rows = self._fetch_sample_rows(
+                    namespace, table.name, self.spec.introspect_sample_rows
+                )
+            return table
+
+        if len(candidates) <= 1:
+            return [fill(ns, t) for ns, t in candidates]
+        with ThreadPoolExecutor(max_workers=min(4, len(candidates))) as pool:
+            futures = [pool.submit(fill, ns, t) for ns, t in candidates]
+            return [f.result() for f in futures]
+
+    def discover(self, *, max_tables: int = 2000) -> tuple[list[NamespaceTables], bool]:
+        """Every namespace and its table names, ignoring the spec's allowlists.
+
+        This is what the scope picker browses, so it deliberately shows tables
+        the current scope hides -- a picker that could only show what is already
+        selected could never be used to select anything else. No columns and no
+        sample rows: one catalog query per namespace on either engine.
+
+        Returns the namespaces and whether ``max_tables`` truncated the walk.
+        """
+        out: list[NamespaceTables] = []
+        seen = 0
+        for namespace in self._list_namespaces():
+            tables = self._fetch_tables(namespace)
+            if seen + len(tables) > max_tables:
+                out.append(NamespaceTables(namespace, tables[: max_tables - seen]))
+                return out, True
+            seen += len(tables)
+            out.append(NamespaceTables(namespace, tables))
+        return out, False

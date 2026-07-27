@@ -1,4 +1,9 @@
-import type { CellValue, ChartBlockData, ChartType } from "@/lib/api/types";
+import type {
+  CellValue,
+  ChartBlockData,
+  ChartType,
+  ChartUnit,
+} from "@/lib/api/types";
 import {
   formatCompact,
   formatExact,
@@ -42,6 +47,8 @@ export interface SeriesMeta {
 
 export interface ChartData {
   form: ChartForm;
+  /** Render the series stacked — the model asked and the data supports it. */
+  stacked: boolean;
   /** One object per x value: `{ x, xLabel, s0, s1, ... }`. */
   rows: Record<string, CellValue>[];
   series: SeriesMeta[];
@@ -81,6 +88,31 @@ export function inferUnit(name: string, values: number[]): Unit {
   if (DURATION_NAME.test(name)) return "duration";
   if (COUNT_NAME.test(name)) return "count";
   return "none";
+}
+
+/**
+ * An explicit model-declared unit beats name inference. `"ratio"` asserts the
+ * values are 0..1 fractions; when a value disproves that, fall back to plain
+ * `percent` (suffix without scaling) — an asserted ratio that is not one must
+ * not display 45 as 4500%.
+ */
+export function resolveUnit(
+  declared: ChartUnit | undefined,
+  inferred: Unit,
+  values: number[],
+): Unit {
+  if (declared === "ratio") {
+    return values.every((v) => v >= 0 && v <= 1) ? "ratio-percent" : "percent";
+  }
+  if (
+    declared === "percent" ||
+    declared === "currency" ||
+    declared === "duration" ||
+    declared === "count"
+  ) {
+    return declared;
+  }
+  return inferred;
 }
 
 export function scaleForUnit(value: number, unit: Unit): number {
@@ -147,6 +179,7 @@ export function toChartData(block: ChartBlockData): ChartData {
   if (xValues.length === 0 || rawSeries.length === 0) {
     return {
       form: "empty",
+      stacked: false,
       rows: [],
       series: [],
       xLabel: block.x?.label ?? "",
@@ -168,14 +201,17 @@ export function toChartData(block: ChartBlockData): ChartData {
     }),
   );
 
-  const series: SeriesMeta[] = rawSeries.map((s, i) => ({
-    key: `s${i}`,
-    label: s.name,
-    // Colour follows the entity in delivered order, never its rank -- so
-    // isolating or re-sorting never repaints the survivors.
-    color: SERIES_COLORS[i % SERIES_COLORS.length],
-    unit: inferUnit(s.name, numeric[i].filter((n): n is number => n !== null)),
-  }));
+  const series: SeriesMeta[] = rawSeries.map((s, i) => {
+    const values = numeric[i].filter((n): n is number => n !== null);
+    return {
+      key: `s${i}`,
+      label: s.name,
+      // Colour follows the entity in delivered order, never its rank -- so
+      // isolating or re-sorting never repaints the survivors.
+      color: SERIES_COLORS[i % SERIES_COLORS.length],
+      unit: resolveUnit(block.unit, inferUnit(s.name, values), values),
+    };
+  });
 
   const temporal = xValues.every(isIsoDateLike);
 
@@ -217,8 +253,16 @@ export function toChartData(block: ChartBlockData): ChartData {
         ? unitSuffix([...units][0]).replace(/[() ]/g, "")
         : "";
 
+  const form = inferForm(block, rows.length, series, units, temporal);
+  const stacked =
+    block.stacked === true &&
+    series.length >= 2 &&
+    units.size === 1 &&
+    (form === "bar" || form === "horizontal-bar" || form === "area");
+
   return {
-    form: inferForm(block, rows.length, series, units),
+    form,
+    stacked,
     rows,
     series,
     xLabel: block.x?.label ?? "",
@@ -235,15 +279,21 @@ function maxAt(numeric: (number | null)[][], i: number): number {
 
 /**
  * Pick the form the data actually supports, which is not always the one the
- * model asked for.
+ * model asked for. Precedence: data impossibilities, then honesty guardrails
+ * (regardless of what was requested), then the model's hint when the data
+ * supports it, then heuristics. An unknown chart_type falls through to "bar",
+ * which is what keeps new documents safe on an old cached bundle.
  */
 export function inferForm(
   block: ChartBlockData,
   categories: number,
   series: SeriesMeta[],
   units: Set<Unit>,
+  temporal: boolean,
 ): ChartForm {
   const requested: ChartType = block.chart_type ?? "bar";
+  const stackable =
+    block.stacked === true && series.length >= 2 && units.size === 1;
 
   if (categories === 0 || series.length === 0) return "empty";
   // A one-bar bar chart is never the right answer.
@@ -254,12 +304,18 @@ export function inferForm(
     return "share-bar";
   }
 
-  // No stacking flag exists, so stacking would misstate; and three overlapping
-  // washes are unreadable regardless.
-  if (requested === "area" && series.length >= 3) return "line";
-
   // Never a dual axis -- the most common charting lie.
   if (series.length > 6 || units.size > 1) return "small-multiples";
+
+  // The model's hint, honored when the data supports it: a horizontal time
+  // axis reads wrong, so a temporal x falls back to vertical bars.
+  if (requested === "horizontal_bar") {
+    return temporal ? "bar" : "horizontal-bar";
+  }
+
+  // Three overlapping washes are unreadable -- but stacked areas tile, so a
+  // stacking request lifts the demotion.
+  if (requested === "area" && series.length >= 3 && !stackable) return "line";
 
   const labelsAreLong = block.x.values.some(
     (v) => String(v ?? "").length > LONG_LABEL,

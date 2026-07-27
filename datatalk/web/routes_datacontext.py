@@ -44,7 +44,7 @@ from datatalk.web.deps import (
     require_connection,
     require_same_org,
 )
-from datatalk.web.streaming import MEDIA_TYPE, ndjson
+from datatalk.web.streaming import MEDIA_TYPE, drain, ndjson
 
 # Router-level guards, so a route added here cannot forget either.
 router = APIRouter(
@@ -276,11 +276,8 @@ def generate(
         t = threading.Thread(target=worker, daemon=True)
         t.start()
 
-        while True:
-            item = q.get()
-            if item is None:
-                break
-            yield ndjson(item[0], item[1])
+        for kind, data in drain(q):
+            yield ndjson(kind, data)
 
         t.join()
         if "result" in holder:

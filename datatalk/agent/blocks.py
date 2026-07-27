@@ -20,7 +20,14 @@ import json
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
-CHART_TYPES = {"bar", "line", "area", "pie"}
+CHART_TYPES = {"bar", "horizontal_bar", "line", "area", "pie"}
+
+# Presentation hints. Unlike a bad dataset reference (which degrades the block
+# to a note), a bad hint is silently normalized to None: the numbers are intact
+# and the frontend's own inference takes over, so degrading would cost content
+# to fix cosmetics.
+CHART_UNITS = {"percent", "ratio", "currency", "duration", "count"}
+STAT_DIRECTIONS = {"up_is_good", "down_is_good", "neutral"}
 
 
 # --- block dataclasses -------------------------------------------------------
@@ -59,6 +66,10 @@ class Chart:
     dataset_id: str | None = None
     x_col: str | None = None
     series_cols: list[str] | None = None
+    # presentation hints (None, not False: block_to_dict drops None, keeping
+    # documents authored before these fields existed byte-identical)
+    unit: str | None = None       # one of CHART_UNITS, shared by every series
+    stacked: bool | None = None   # bar/area: series are parts of a whole
     # materialized form
     x: dict[str, Any] | None = None  # {label, values}
     series: list[dict[str, Any]] | None = None  # [{name, values}]
@@ -75,6 +86,7 @@ class Stat:
     row_index: int | None = None  # None = last row (aggregates are single-row)
     delta_col: str | None = None  # a prior-period value column in the same dataset
     unit: str | None = None       # e.g. "%", "$"
+    direction: str | None = None  # one of STAT_DIRECTIONS; None = up_is_good
     # materialized form
     value: Any = None
     delta: Any = None
@@ -159,34 +171,58 @@ def _note(text: str) -> Paragraph:
     return Paragraph(text=f"_{text}_")
 
 
-def _materialize_table(block: Table, datasets: dict[str, Any]) -> Any:
+def _check_table(block: Table, datasets: dict[str, Any]) -> str | None:
+    """Why this authoring table cannot be materialized, or None if it can."""
     ds = datasets.get(block.dataset_id)
     if ds is None:
-        return _note(f"table unavailable: unknown dataset '{block.dataset_id}'")
+        return f"table unavailable: unknown dataset '{block.dataset_id}'"
     cols = block.columns or list(ds.columns)
     missing = [c for c in cols if c not in ds.columns]
     if missing:
-        return _note(f"table unavailable: unknown column(s) {', '.join(missing)}")
+        return f"table unavailable: unknown column(s) {', '.join(missing)}"
+    return None
+
+
+def _materialize_table(block: Table, datasets: dict[str, Any]) -> Any:
+    problem = _check_table(block, datasets)
+    if problem:
+        return _note(problem)
+    ds = datasets[block.dataset_id]
+    cols = block.columns or list(ds.columns)
     idx = [ds.columns.index(c) for c in cols]
     rows = [[row[i] for i in idx] for row in ds.rows]
     # dataset_id survives materialization so the UI can cite the query behind
     # every number. It is not what makes a block "authoring" -- ``rows is None``
     # is (see ``_is_authoring_table``).
-    return Table(dataset_id=block.dataset_id, columns=list(cols), rows=rows)
+    return Table(
+        dataset_id=block.dataset_id,
+        columns=list(cols),
+        rows=rows,
+        width=_clamp_width(block.width),
+    )
 
 
-def _materialize_chart(block: Chart, datasets: dict[str, Any]) -> Any:
+def _check_chart(block: Chart, datasets: dict[str, Any]) -> str | None:
+    """Why this authoring chart cannot be materialized, or None if it can."""
     ds = datasets.get(block.dataset_id)
     if ds is None:
-        return _note(f"chart unavailable: unknown dataset '{block.dataset_id}'")
+        return f"chart unavailable: unknown dataset '{block.dataset_id}'"
     if block.chart_type not in CHART_TYPES:
-        return _note(f"chart unavailable: unknown chart type '{block.chart_type}'")
+        return f"chart unavailable: unknown chart type '{block.chart_type}'"
     if not block.x_col or not block.series_cols:
-        return _note("chart unavailable: missing x_col or series_cols")
+        return "chart unavailable: missing x_col or series_cols"
     needed = [block.x_col, *block.series_cols]
     missing = [c for c in needed if c not in ds.columns]
     if missing:
-        return _note(f"chart unavailable: unknown column(s) {', '.join(missing)}")
+        return f"chart unavailable: unknown column(s) {', '.join(missing)}"
+    return None
+
+
+def _materialize_chart(block: Chart, datasets: dict[str, Any]) -> Any:
+    problem = _check_chart(block, datasets)
+    if problem:
+        return _note(problem)
+    ds = datasets[block.dataset_id]
     xi = ds.columns.index(block.x_col)
     x_values = [row[xi] for row in ds.rows]
     series = []
@@ -197,8 +233,11 @@ def _materialize_chart(block: Chart, datasets: dict[str, Any]) -> Any:
         chart_type=block.chart_type,
         title=block.title,
         dataset_id=block.dataset_id,
+        unit=block.unit if block.unit in CHART_UNITS else None,
+        stacked=True if block.stacked else None,
         x={"label": block.x_col, "values": x_values},
         series=series,
+        width=_clamp_width(block.width),
     )
 
 
@@ -226,27 +265,43 @@ def _compute_delta(value: Any, prior: Any) -> tuple[Any, float | None]:
     return delta, delta_pct
 
 
-def _materialize_stat(block: Stat, datasets: dict[str, Any]) -> Any:
+def _stat_row_index(block: Stat, ds: Any) -> int:
+    """The row a stat reads. ``row_index`` None means the last row."""
+    return block.row_index if block.row_index is not None else len(ds.rows) - 1
+
+
+def _check_stat(block: Stat, datasets: dict[str, Any]) -> str | None:
+    """Why this authoring stat cannot be materialized, or None if it can."""
     ds = datasets.get(block.dataset_id)
     if ds is None:
-        return _note(f"stat unavailable: unknown dataset '{block.dataset_id}'")
+        return f"stat unavailable: unknown dataset '{block.dataset_id}'"
     if not block.value_col or block.value_col not in ds.columns:
-        return _note(f"stat unavailable: unknown column '{block.value_col}'")
+        return f"stat unavailable: unknown column '{block.value_col}'"
     if not ds.rows:
-        return _note(f"stat unavailable: dataset '{block.dataset_id}' has no rows")
-    ri = block.row_index if block.row_index is not None else len(ds.rows) - 1
+        return f"stat unavailable: dataset '{block.dataset_id}' has no rows"
+    ri = _stat_row_index(block, ds)
     if ri < 0 or ri >= len(ds.rows):
-        return _note(f"stat unavailable: row_index {ri} out of range")
+        return f"stat unavailable: row_index {ri} out of range"
+    if block.delta_col and block.delta_col not in ds.columns:
+        return f"stat unavailable: unknown delta column '{block.delta_col}'"
+    return None
+
+
+def _materialize_stat(block: Stat, datasets: dict[str, Any]) -> Any:
+    problem = _check_stat(block, datasets)
+    if problem:
+        return _note(problem)
+    ds = datasets[block.dataset_id]
+    ri = _stat_row_index(block, ds)
     value = ds.rows[ri][ds.columns.index(block.value_col)]
     delta = delta_pct = None
     if block.delta_col:
-        if block.delta_col not in ds.columns:
-            return _note(f"stat unavailable: unknown delta column '{block.delta_col}'")
         prior = ds.rows[ri][ds.columns.index(block.delta_col)]
         delta, delta_pct = _compute_delta(value, prior)
     return Stat(
         label=block.label, unit=block.unit, width=_clamp_width(block.width),
         dataset_id=block.dataset_id,
+        direction=block.direction if block.direction in STAT_DIRECTIONS else None,
         value=value, delta=delta, delta_pct=delta_pct,
     )
 
@@ -286,6 +341,77 @@ def materialize(doc: Document, datasets: dict[str, Any]) -> Document:
     whole dashboard. ``Row`` blocks recurse into their children.
     """
     return Document(blocks=[_materialize_block(b, datasets) for b in doc.blocks])
+
+
+# --- reference validation ----------------------------------------------------
+
+@dataclass(frozen=True)
+class RefError:
+    """One authoring block that cannot be materialized against the datasets."""
+
+    path: str  # e.g. "blocks[0].children[2]"
+    block_type: str
+    message: str
+
+    def __str__(self) -> str:
+        return f"{self.path} ({self.block_type}): {self.message}"
+
+
+def _validate_block(b: Any, datasets: dict[str, Any], path: str) -> list[RefError]:
+    if isinstance(b, Row):
+        out: list[RefError] = []
+        for i, c in enumerate(b.children):
+            out.extend(_validate_block(c, datasets, f"{path}.children[{i}]"))
+        return out
+    if _is_authoring_table(b):
+        problem = _check_table(b, datasets)
+        return [RefError(path, "table", problem)] if problem else []
+    if _is_authoring_chart(b):
+        problem = _check_chart(b, datasets)
+        return [RefError(path, "chart", problem)] if problem else []
+    if _is_authoring_stat(b):
+        problem = _check_stat(b, datasets)
+        return [RefError(path, "stat", problem)] if problem else []
+    return []
+
+
+def validate_references(doc: Document, datasets: dict[str, Any]) -> list[RefError]:
+    """Every block reference that would degrade to a note under :func:`materialize`.
+
+    Walks the same tree :func:`materialize` walks and calls the very same
+    ``_check_*`` predicates, so validation cannot disagree with materialization.
+    Nothing is resolved and no row data is copied — this exists so an authoring
+    agent can be handed its own mistakes and given one chance to fix them,
+    rather than shipping a page of ``_… unavailable_`` notes.
+    """
+    out: list[RefError] = []
+    for i, b in enumerate(doc.blocks):
+        out.extend(_validate_block(b, datasets, f"blocks[{i}]"))
+    return out
+
+
+def _is_materialized_data_block(b: Any) -> bool:
+    return (
+        (isinstance(b, Table) and b.rows is not None)
+        or (isinstance(b, Chart) and b.x is not None)
+        or (isinstance(b, Stat) and b.value is not None)
+    )
+
+
+def _count_data_blocks(b: Any) -> int:
+    if isinstance(b, Row):
+        return sum(_count_data_blocks(c) for c in b.children)
+    return 1 if _is_materialized_data_block(b) else 0
+
+
+def count_data_blocks(doc: Document) -> int:
+    """How many blocks in a *materialized* Document actually carry data.
+
+    Zero means the document is prose (or a page of degradation notes) — the
+    signal that a dashboard is empty in substance even when ``blocks`` is not.
+    Recurses into rows exactly as :func:`materialize` does.
+    """
+    return sum(_count_data_blocks(b) for b in doc.blocks)
 
 
 # --- flattening --------------------------------------------------------------

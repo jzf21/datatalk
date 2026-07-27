@@ -54,6 +54,20 @@ class RequestContext:
     user: models.User
     org: models.Org
 
+    def release_db(self) -> None:
+        """Return the request session's pooled connection before streaming.
+
+        Yield-dependency teardown runs only after the response body is fully
+        consumed, so without this a streaming endpoint pins one pooled
+        connection for the entire multi-minute generation. Called as the first
+        line of a stream generator, after every handler-body read is done;
+        ``db``/``store`` must not be touched afterwards. The dependency
+        teardown's later commit-and-close on the released session merely
+        autobegins and commits an empty transaction — a microsecond checkout.
+        """
+        self.db.commit()
+        self.db.close()
+
 
 def get_db(db: Session = Depends(db_session)) -> Session:
     return db

@@ -37,6 +37,11 @@ export function ContextEditor({
   const [summary, setSummary] = useState(file.summary);
   const [preview, setPreview] = useState(false);
 
+  // A viewer with no edit rights only ever reads, so there is nothing to toggle:
+  // they get the rendered markdown, never the raw textarea. The Edit/Preview
+  // switch exists solely for someone who can change the body.
+  const rendered = preview || !canEdit;
+
   const dirty = body !== file.body_md || summary !== file.summary;
 
   return (
@@ -46,22 +51,24 @@ export function ContextEditor({
         <Badge variant="secondary">{file.origin}</Badge>
         {file.human_owned && <Badge>Edited</Badge>}
         <span className="flex-1" />
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => setPreview((p) => !p)}
-          aria-pressed={preview}
-        >
-          {preview ? (
-            <>
-              <Pencil className="size-3.5" aria-hidden /> Edit
-            </>
-          ) : (
-            <>
-              <Eye className="size-3.5" aria-hidden /> Preview
-            </>
-          )}
-        </Button>
+        {canEdit && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setPreview((p) => !p)}
+            aria-pressed={preview}
+          >
+            {preview ? (
+              <>
+                <Pencil className="size-3.5" aria-hidden /> Edit
+              </>
+            ) : (
+              <>
+                <Eye className="size-3.5" aria-hidden /> Preview
+              </>
+            )}
+          </Button>
+        )}
       </div>
 
       <div className="space-y-1.5">
@@ -84,7 +91,7 @@ export function ContextEditor({
         </p>
       </div>
 
-      {preview ? (
+      {rendered ? (
         <div className="rounded-[6px] border border-border bg-card p-4">
           <Markdown className="doc-measure">{body}</Markdown>
         </div>

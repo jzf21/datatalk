@@ -23,6 +23,7 @@ from typing import Any
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from datatalk import jsonsafe
 from datatalk.config import get_settings
 
 
@@ -30,29 +31,18 @@ class DatabaseNotConfiguredError(RuntimeError):
     """DATABASE_URL is unset or not a Postgres URL."""
 
 
-def _scrub_nuls(obj: Any) -> Any:
-    """Strip NUL bytes, which are legal in ClickHouse strings but not in JSONB.
-
-    Materialized documents embed real ClickHouse cell values. SQLite TEXT
-    accepted ``\\u0000``; Postgres JSONB rejects it outright.
-    """
-    if isinstance(obj, str):
-        return obj.replace("\x00", "")
-    if isinstance(obj, dict):
-        return {_scrub_nuls(k): _scrub_nuls(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [_scrub_nuls(v) for v in obj]
-    return obj
-
-
 def _json_dumps(obj: Any) -> str:
     """Serializer for every JSONB column.
 
-    ``default=str`` is the project-wide convention (ClickHouse rows carry
-    datetimes and Decimals). Setting it on the engine means the convention holds
-    automatically everywhere instead of being re-applied at each call site.
+    Materialized documents embed real warehouse cell values, which include
+    things JSONB will not accept: NUL bytes (legal in a ClickHouse string) and
+    NaN/Infinity (any aggregate can produce one). Both are handled in
+    :mod:`datatalk.jsonsafe`, which the NDJSON wire uses too.
+
+    Setting this on the engine means the convention holds automatically
+    everywhere instead of being re-applied at each call site.
     """
-    return json.dumps(_scrub_nuls(obj), default=str)
+    return jsonsafe.dumps(obj)
 
 
 @lru_cache(maxsize=1)
@@ -108,9 +98,13 @@ def session_scope() -> Iterator[Session]:
 def db_session() -> Iterator[Session]:
     """FastAPI dependency.
 
-    Only for short handlers. Do NOT use for the streaming endpoints: yield-
-    dependency teardown happens after the response body is fully consumed, so
-    this would pin a pooled connection for the entire multi-minute generation.
+    Yield-dependency teardown happens after the response body is fully
+    consumed, which for a streaming endpoint would pin a pooled connection for
+    the entire multi-minute generation — those endpoints therefore call
+    ``RequestContext.release_db()`` as the first line of their stream
+    generator, once every handler-body read is done. The teardown here then
+    commits and closes an already-released session, which costs a microsecond
+    connection checkout and nothing else.
     """
     with session_scope() as session:
         yield session

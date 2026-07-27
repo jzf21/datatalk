@@ -160,6 +160,110 @@ describe("form inference", () => {
   });
 });
 
+describe("declared units", () => {
+  it("lets an explicit unit beat name inference", () => {
+    const data = toChartData(
+      chart({ unit: "currency", series: [{ name: "calls", values: [10, 20, 30] }] }),
+    );
+    expect(data.series[0].unit).toBe("currency");
+  });
+
+  it("maps a declared ratio to scaled percent display", () => {
+    const data = toChartData(
+      chart({ unit: "ratio", series: [{ name: "score", values: [0.5, 0.8, 0.9] }] }),
+    );
+    expect(data.series[0].unit).toBe("ratio-percent");
+  });
+
+  it("does not scale an asserted ratio that is not one", () => {
+    // 45 displayed as 4500% would be worse than no unit at all.
+    const data = toChartData(
+      chart({ unit: "ratio", series: [{ name: "score", values: [0.5, 45, 0.9] }] }),
+    );
+    expect(data.series[0].unit).toBe("percent");
+  });
+
+  it("suppresses the mixed-units small-multiples demotion", () => {
+    const data = toChartData(
+      chart({
+        unit: "count",
+        series: [
+          { name: "revenue_usd", values: [100, 200, 300] },
+          { name: "calls", values: [10, 20, 30] },
+        ],
+      }),
+    );
+    expect(data.form).toBe("bar");
+  });
+
+  it("falls back to inference on an unknown declared unit", () => {
+    const data = toChartData(
+      // A future backend could ship a unit this bundle doesn't know.
+      chart({ unit: "furlongs" as never }),
+    );
+    expect(data.series[0].unit).toBe("count");
+  });
+});
+
+describe("model form hints", () => {
+  it("honors horizontal_bar for categorical data", () => {
+    const data = toChartData(
+      chart({
+        chart_type: "horizontal_bar",
+        x: { label: "account", values: ["a", "b", "c"] },
+      }),
+    );
+    expect(data.form).toBe("horizontal-bar");
+  });
+
+  it("refuses horizontal_bar on a time axis", () => {
+    const data = toChartData(chart({ chart_type: "horizontal_bar" }));
+    expect(data.temporal).toBe(true);
+    expect(data.form).toBe("bar");
+  });
+
+  it("falls through an unknown chart_type to bar", () => {
+    // Pins the degrade path an old cached bundle relies on for new documents.
+    const data = toChartData(chart({ chart_type: "sunburst" as never }));
+    expect(data.form).toBe("bar");
+  });
+
+  it("keeps a stacked 3-series area as an area", () => {
+    const data = toChartData(
+      chart({
+        chart_type: "area",
+        stacked: true,
+        series: [
+          { name: "a", values: [1, 2, 3] },
+          { name: "b", values: [1, 2, 3] },
+          { name: "c", values: [1, 2, 3] },
+        ],
+      }),
+    );
+    expect(data.form).toBe("area");
+    expect(data.stacked).toBe(true);
+  });
+
+  it("still demotes stacking when units conflict", () => {
+    const data = toChartData(
+      chart({
+        stacked: true,
+        series: [
+          { name: "revenue_usd", values: [100, 200, 300] },
+          { name: "calls", values: [10, 20, 30] },
+        ],
+      }),
+    );
+    expect(data.form).toBe("small-multiples");
+    expect(data.stacked).toBe(false);
+  });
+
+  it("never stacks a single series", () => {
+    const data = toChartData(chart({ stacked: true }));
+    expect(data.stacked).toBe(false);
+  });
+});
+
 describe("category cap", () => {
   it("keeps the biggest 25 and reports the true total", () => {
     const n = 43;

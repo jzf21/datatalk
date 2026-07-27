@@ -72,6 +72,7 @@ def fingerprint(spec: WarehouseSpec) -> str:
             str(int(spec.secure)),
             spec.sslmode or "",
             ",".join(spec.introspect_databases),
+            ",".join(spec.introspect_tables),
             ",".join(spec.introspect_exclude_patterns),
             str(spec.introspect_sample_rows),
             str(spec.introspect_max_tables),

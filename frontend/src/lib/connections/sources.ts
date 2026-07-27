@@ -1,4 +1,8 @@
-import type { ConnectionInput, WarehouseType } from "@/lib/api/auth";
+import type {
+  ConnectionInput,
+  ConnectionPublic,
+  WarehouseType,
+} from "@/lib/api/auth";
 
 /**
  * The catalogue of warehouse engines a workspace can connect to.
@@ -13,7 +17,14 @@ import type { ConnectionInput, WarehouseType } from "@/lib/api/auth";
 export interface DataSourceField {
   id: Exclude<
     keyof ConnectionInput,
-    "secure" | "type" | "name" | "description" | "is_default"
+    | "secure"
+    | "type"
+    | "name"
+    | "description"
+    | "is_default"
+    // Drawn by the scope picker, not as a text input.
+    | "introspect_databases"
+    | "introspect_tables"
   >;
   label: string;
   type?: "text" | "number" | "password" | "select";
@@ -109,4 +120,34 @@ export function getDataSource(id: string | null): DataSource | null {
 /** Engine label for a stored source, for badges and health rows. */
 export function sourceTypeName(type: string): string {
   return getDataSource(type)?.name ?? type;
+}
+
+/**
+ * A stored source back into the shape create/update/discover accept.
+ *
+ * The scope screen edits one field of a source it did not load a form for, and
+ * the API takes whole connections rather than patches -- so it has to send the
+ * rest back unchanged. `password: null` is what keeps the stored secret: the
+ * UI never receives it and so can never echo it.
+ */
+export function toConnectionInput(
+  connection: ConnectionPublic,
+  overrides: Partial<ConnectionInput> = {},
+): ConnectionInput {
+  return {
+    type: connection.type,
+    name: connection.name,
+    description: connection.description ?? "",
+    is_default: Boolean(connection.is_default),
+    host: connection.host,
+    port: connection.port,
+    user: connection.user,
+    password: null,
+    database: connection.database,
+    secure: Boolean(connection.secure),
+    sslmode: connection.sslmode ?? null,
+    introspect_databases: connection.introspect_databases ?? [],
+    introspect_tables: connection.introspect_tables ?? [],
+    ...overrides,
+  };
 }

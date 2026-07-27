@@ -64,6 +64,12 @@ export function QueryCard({
           </code>
         </button>
 
+        {step.source && (
+          <span className="cite shrink-0 rounded-[2px] bg-muted px-1 text-ink-tertiary">
+            {step.source}
+          </span>
+        )}
+
         {running ? (
           <span
             className="h-[3px] w-12 shrink-0 overflow-hidden rounded-full bg-muted"

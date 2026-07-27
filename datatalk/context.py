@@ -223,6 +223,9 @@ class ContextModel:
             "Read a file with the `read_context` tool before deciding which table",
             "holds an entity, what a metric means, or how a question of this shape",
             "is normally answered here. Do not guess when a file covers it.",
+            "Batch the reads: on your FIRST step, pass every file relevant to the",
+            "task as one `read_context` call (`paths` takes several) — each extra",
+            "call costs a whole turn you could have spent querying.",
             "",
         ]
         for f in self.files:
@@ -297,6 +300,30 @@ class TenantContext:
         model. Falls back to :attr:`model` when unconfigured.
         """
         return self.settings.docs_model
+
+    @property
+    def author_openai(self) -> OpenAI:
+        """Client for the dashboard author, which may use a second endpoint.
+
+        The test override wins here too, so one scripted fake still drives the
+        whole pipeline.
+        """
+        if self.openai_override is not None:
+            return self.openai_override
+        return clients.openai_for(self.settings.author_openai_settings)
+
+    @property
+    def author_model(self) -> str:
+        """The model reserved for authoring a dashboard grid.
+
+        One call per dashboard, and the only one that must emit a whole grid as
+        a single valid JSON object referencing real dataset ids -- a malformed
+        reply costs the entire dashboard. Falls back to :attr:`model` when
+        unconfigured. Travels with :attr:`author_openai` for the same reason
+        ``docs_model`` travels with ``docs_openai``: overriding the model name
+        alone would send the call to the wrong endpoint.
+        """
+        return self.settings.author_model
 
     @property
     def has_connection(self) -> bool:

@@ -218,6 +218,12 @@ class OrgWarehouseConnection(Base):
     introspect_databases: Mapped[list[str]] = mapped_column(
         ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
     )
+    # Qualified ``namespace.table`` entries, scoped per namespace: a namespace
+    # named here shows only its listed tables, one absent from it shows all of
+    # them. Empty behaves exactly as before this column existed.
+    introspect_tables: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
+    )
     introspect_exclude_patterns: Mapped[list[str]] = mapped_column(
         ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
     )
@@ -276,6 +282,7 @@ class OrgWarehouseConnection(Base):
             "sslmode": self.sslmode,
             "has_password": bool(self.password),
             "introspect_databases": list(self.introspect_databases or []),
+            "introspect_tables": list(self.introspect_tables or []),
             "introspect_exclude_patterns": list(self.introspect_exclude_patterns or []),
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -396,6 +403,10 @@ class Dashboard(Base):
     title: Mapped[str] = mapped_column(Text, nullable=False)
     document: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
     queries: Mapped[list] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    # The insight pass's structured findings ({"insights": [...], ...}). The
+    # grid is shaped by them, so a saved dashboard without them loses the
+    # "why these widgets" part of its own story.
+    insights: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
     analysis: Mapped[str | None] = mapped_column(Text)
     legacy_id: Mapped[int | None] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = _created_at()

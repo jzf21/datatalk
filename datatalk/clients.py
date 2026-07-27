@@ -110,7 +110,13 @@ def openai_for(settings: Settings) -> OpenAI:
     ``openai.OpenAI`` wraps a thread-safe ``httpx.Client``, so one instance per
     (api_key, base_url) is correct and cheap to share across threads.
     """
-    kwargs: dict[str, Any] = {"api_key": settings.openai_api_key}
+    kwargs: dict[str, Any] = {
+        "api_key": settings.openai_api_key,
+        # Not part of the fingerprint: these are process-wide env settings, so
+        # changing them already means a restart.
+        "max_retries": settings.openai_max_retries,
+        "timeout": settings.openai_timeout_seconds,
+    }
     if settings.openai_base_url:
         kwargs["base_url"] = settings.openai_base_url
     return _get_or_create(_OA, openai_fingerprint(settings), lambda: OpenAI(**kwargs))

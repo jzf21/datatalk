@@ -51,8 +51,16 @@ def message(content=None, tool_calls=None):
     return SimpleNamespace(content=content, tool_calls=tool_calls)
 
 
-def response(msg):
-    return SimpleNamespace(choices=[SimpleNamespace(message=msg)])
+def response(msg, finish_reason="stop"):
+    """A chat completion. ``finish_reason="length"`` is a truncated reply.
+
+    Truncation is indistinguishable from malformed JSON at the parse layer, so
+    it is the one signal that tells the dashboard author a retry is worth making
+    shorter rather than merely different.
+    """
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=msg, finish_reason=finish_reason)]
+    )
 
 
 class FakeCompletions:

@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 from datatalk.agent.blocks import Document, materialize, parse_json_object
 from datatalk.agent.sqlloop import EventFn, run_capture_loop
-from datatalk.llm.prompts import BLOCK_SCHEMA_DOC, QA_SYSTEM, _ANTI_FABRICATION
+from datatalk.llm.prompts import BLOCK_SCHEMA_DOC, QA_SYSTEM, ANTI_FABRICATION
 
 if TYPE_CHECKING:
     from datatalk.context import TenantContext
@@ -45,7 +45,7 @@ def answer_question(
     """
     system = QA_SYSTEM.format(
         block_schema=BLOCK_SCHEMA_DOC,
-        anti_fabrication=_ANTI_FABRICATION,
+        anti_fabrication=ANTI_FABRICATION,
         schema_context=schema_context,
     )
 

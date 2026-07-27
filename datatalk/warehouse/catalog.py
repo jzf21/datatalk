@@ -163,7 +163,10 @@ def invalidate_schema(org_id: Any, fingerprint: str | None = None) -> None:
 
 
 def _source_block(ctx: "TenantContext", ref: "SourceRef", force_refresh: bool) -> str:
-    header = f"SOURCE {ref.name} [{ref.type}]"
+    # The name is quoted because it is the single thing models most reliably
+    # get wrong here: it is a run_sql argument, not an identifier, and unquoted
+    # beside `database.table` lines it reads like one more schema name.
+    header = f'SOURCE "{ref.name}" [{ref.type}]'
     if ref.description:
         header += f" — {ref.description}"
 
@@ -174,7 +177,37 @@ def _source_block(ctx: "TenantContext", ref: "SourceRef", force_refresh: bool) -
 
     if not tables:
         return f"{header}\n  (no tables visible)"
-    return f"{header}\n{render_table_summary(tables)}"
+
+    lines = [header]
+    scope = _scope_note(ref, tables)
+    if scope:
+        lines.append(scope)
+    lines.append(render_table_summary(tables))
+    return "\n".join(lines)
+
+
+def _scope_note(ref: "SourceRef", tables: list[Table]) -> str:
+    """One line naming the scope, when this workspace has narrowed the source.
+
+    Without it a model that has seen a table name elsewhere -- in the context
+    model, in a past report, in a user's question -- keeps trying to reach a
+    database this source deliberately does not expose, and reads the resulting
+    error as a transient failure worth retrying.
+    """
+    if not ref.spec.introspect_databases:
+        return ""
+
+    shown = sorted({t.database for t in tables})
+    if not shown:
+        return ""
+    noun = "schema" if ref.type == "postgres" else "database"
+    if len(shown) > 1:
+        noun += "s"
+    return (
+        f"  (this workspace scopes this source to the {noun} "
+        f"{', '.join(shown)}; nothing else on this server is reachable here, "
+        f"and the tables listed below are all of it)"
+    )
 
 
 def build_catalog(ctx: "TenantContext", *, force_refresh: bool = False) -> str:
@@ -214,7 +247,16 @@ def _sql_rules(ctx: "TenantContext") -> str:
     """The dialect hints and cross-source rule, built from the sources present."""
     from datatalk.warehouse import dialect_for
 
-    lines = ["SQL RULES", "- Every run_sql call must name a source."]
+    lines = [
+        "SQL RULES",
+        '- Every run_sql call must name a source in its "source" argument.',
+        # The failure this prevents: the model reads the SOURCE header as a
+        # schema name and writes `FROM analytics.events` against a source called
+        # analytics whose tables actually live in a database of another name.
+        "- A source name is a connection handle, NOT a database or schema name. "
+        "Never write it inside SQL. Every table below is already written "
+        "exactly as it must appear in a query against that source.",
+    ]
     if len(ctx.sources) > 1:
         lines.append(
             "- One statement queries ONE source. You cannot join across "

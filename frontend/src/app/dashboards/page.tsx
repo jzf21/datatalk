@@ -7,6 +7,7 @@ import { PageBody, PageHeader } from "@/components/layout/page-header";
 import { Composer } from "@/components/run/composer";
 import { GenerationProgress } from "@/components/run/generation-progress";
 import { DocumentView } from "@/components/doc/block-renderer";
+import { InsightPanel } from "@/components/doc/insight-panel";
 import { SourcesProvider } from "@/components/doc/sources-context";
 import { SourcesRail } from "@/components/doc/sources-rail";
 import { useNdjsonRun } from "@/hooks/use-ndjson-run";
@@ -65,20 +66,31 @@ export default function DashboardsPage() {
         )}
 
         {!idle && !state.document && (
-          <GenerationProgress
-            state={state}
-            onStop={run.stop}
-            onRefine={() => {
-              run.stop();
-              run.reset();
-            }}
-          />
+          <>
+            <GenerationProgress
+              state={state}
+              onStop={run.stop}
+              onRefine={() => {
+                run.stop();
+                run.reset();
+              }}
+            />
+            {/* The findings land right before the author call — the longest
+                silent stretch — so they double as real progress content. */}
+            {state.insights && <InsightPanel insights={state.insights} />}
+          </>
         )}
 
         {state.document && (
           <SourcesProvider queries={state.queries}>
             {/* Dashboards ignore the 68ch measure: every block is full width. */}
             <DocumentView document={state.document} measure={false} />
+            {state.insights && (
+              <InsightPanel
+                insights={state.insights}
+                className="border-t border-border pt-8"
+              />
+            )}
             {state.savedId !== null && (
               <p className="text-[13px] text-ink-secondary">
                 Saved ·{" "}

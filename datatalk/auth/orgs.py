@@ -172,6 +172,9 @@ def spec_from_connection(
         secure=connection.secure,
         sslmode=connection.sslmode,
         introspect_databases=tuple(connection.introspect_databases or ()),
+        introspect_tables=tuple(
+            t.lower() for t in (connection.introspect_tables or ())
+        ),
         introspect_exclude_patterns=tuple(
             p.lower() for p in (connection.introspect_exclude_patterns or ())
         ),

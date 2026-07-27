@@ -81,6 +81,7 @@ def test_any_connection_change_changes_the_fingerprint(override):
     "override",
     [
         {"introspect_databases": ("sales",)},
+        {"introspect_tables": ("sales.orders",)},
         {"introspect_exclude_patterns": ("backup",)},
         {"introspect_sample_rows": 10},
         {"introspect_max_tables": 5},
@@ -294,3 +295,20 @@ def test_context_is_frozen():
     ctx = TenantContext.for_test(settings=_settings())
     with pytest.raises(Exception):
         ctx.org_id = None  # type: ignore[misc]
+
+
+def test_openai_clients_carry_retry_and_timeout_settings(monkeypatch):
+    """Transient 429/5xx resilience lives in the SDK layer, configured here —
+    a run should survive rate limiting without any hand-rolled retry loop."""
+    captured = {}
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(clients, "OpenAI", FakeOpenAI)
+
+    clients.openai_for(_settings(OPENAI_MAX_RETRIES=7, OPENAI_TIMEOUT_SECONDS=45))
+
+    assert captured["max_retries"] == 7
+    assert captured["timeout"] == 45.0

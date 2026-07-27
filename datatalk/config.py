@@ -39,6 +39,29 @@ class Settings(BaseSettings):
     openai_docs_model: str = Field(default="", alias="OPENAI_DOCS_MODEL")
     openai_docs_base_url: str = Field(default="", alias="OPENAI_DOCS_BASE_URL")
     openai_docs_api_key: str = Field(default="", alias="OPENAI_DOCS_API_KEY")
+    # The dashboard author. One call per dashboard, and the most structurally
+    # demanding one in the pipeline: it must emit a whole grid as a single valid
+    # JSON object referencing only real dataset ids and columns. That is exactly
+    # where a small open-weights model is weakest, and a malformed reply costs
+    # the entire dashboard -- so it is worth pointing at a stronger model even
+    # when the query loop stays cheap. Empty = reuse the OPENAI_* values above.
+    openai_author_model: str = Field(default="", alias="OPENAI_AUTHOR_MODEL")
+    openai_author_base_url: str = Field(default="", alias="OPENAI_AUTHOR_BASE_URL")
+    openai_author_api_key: str = Field(default="", alias="OPENAI_AUTHOR_API_KEY")
+    # Completion cap for the author/insight calls. 0 = omit the parameter (the
+    # provider's default). Worth setting on OpenAI-compatible servers whose
+    # default completion cap silently truncates a large dashboard grid.
+    openai_author_max_tokens: int = Field(default=0, alias="OPENAI_AUTHOR_MAX_TOKENS")
+    # Transport resilience, applied to every OpenAI client this process builds.
+    # Retries are the SDK's own (429/5xx/connect errors, with backoff), so a
+    # transient limit does not kill a 15-minute report run; the timeout bounds
+    # a single hung completion, which would otherwise silence a stream past any
+    # proxy's patience (the SDK default is 600s).
+    openai_max_retries: int = Field(default=5, alias="OPENAI_MAX_RETRIES")
+    openai_timeout_seconds: float = Field(default=120.0, alias="OPENAI_TIMEOUT_SECONDS")
+    # Completion cap for the analyze/critique calls, mirroring the author cap
+    # above. 0 = omit the parameter.
+    openai_analyze_max_tokens: int = Field(default=0, alias="OPENAI_ANALYZE_MAX_TOKENS")
 
     # ClickHouse
     clickhouse_host: str = Field(default="localhost", alias="CLICKHOUSE_HOST")
@@ -154,6 +177,28 @@ class Settings(BaseSettings):
             update={
                 "openai_api_key": self.openai_docs_api_key or self.openai_api_key,
                 "openai_base_url": self.openai_docs_base_url or self.openai_base_url,
+            }
+        )
+
+    @property
+    def author_model(self) -> str:
+        return self.openai_author_model or self.openai_model
+
+    @property
+    def author_openai_settings(self) -> "Settings":
+        """Settings whose ``openai_*`` fields address the author endpoint.
+
+        Returns ``self`` when nothing is overridden, so ``clients.openai_for``
+        hands back the very same shared client and nothing extra is cached.
+        """
+        if not (self.openai_author_base_url or self.openai_author_api_key):
+            return self
+        return self.model_copy(
+            update={
+                "openai_api_key": self.openai_author_api_key or self.openai_api_key,
+                "openai_base_url": (
+                    self.openai_author_base_url or self.openai_base_url
+                ),
             }
         )
 

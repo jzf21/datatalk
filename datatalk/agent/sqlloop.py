@@ -16,9 +16,12 @@ report its provenance.
 from __future__ import annotations
 
 import json
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
 
+from datatalk import jsonsafe
 from datatalk.agent.executor import QueryResult, UnsafeSQLError, run_sql
 from datatalk.context import UnknownSourceError
 from datatalk.warehouse import catalog
@@ -30,7 +33,43 @@ if TYPE_CHECKING:
 EventFn = Callable[[str, dict[str, Any]], None]
 
 # How many result rows to actually show the model per query (token control).
-_ROWS_TO_MODEL = 50
+# Public: the insight pass deliberately reads at this same fidelity.
+ROWS_TO_MODEL = 50
+_ROWS_TO_MODEL = ROWS_TO_MODEL  # deprecated alias; prefer ROWS_TO_MODEL
+
+# History compaction. The loop resends its whole history every turn, so a
+# 50-row tool result is paid for on every remaining turn — quadratic in a long
+# dashboard run. A result older than _COMPACT_AFTER_TURNS turns has served its
+# purpose (the model read it and moved on), so it is rewritten ONCE to its
+# first _COMPACT_KEEP_ROWS rows. Once, and never again: OpenAI-compatible
+# providers prefix-cache the unchanged head of the conversation, and a message
+# that keeps churning would forfeit that on every turn instead of one.
+# Blocks reference datasets by id — the model never needs to transcribe old
+# rows — so nothing downstream loses data.
+_COMPACT_AFTER_TURNS = 2
+_COMPACT_MIN_ROWS = 20
+_COMPACT_KEEP_ROWS = 5
+
+# How much of a context-model file body to hand back. Bodies are stored up to
+# MAX_BODY_CHARS (16k) and the loop resends its whole history every turn, so an
+# uncapped body is paid for once per remaining step. `describe_source` attaches
+# covering files the model never asked for, so it stays at the tighter cap; an
+# explicit `read_context` call is a request for the whole file, so it gets more.
+_CONTEXT_BODY_CHARS = 4000
+_READ_CONTEXT_BODY_CHARS = 8000
+
+# How many files one read_context call may fetch. Each loop turn is a full API
+# round trip that resends the whole history, so reading the ontology file and
+# the playbook in ONE call instead of two halves the retrieval overhead.
+_READ_CONTEXT_MAX_PATHS = 4
+
+
+def clip_text(text: str, limit: int) -> str:
+    """Clip to ``limit`` chars with a visible marker; a silent cut reads as a
+    complete file and the model builds on the missing half."""
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}\n\n[… truncated at {limit} of {len(text)} chars]"
 
 _SOURCE_PARAM = {
     "type": "string",
@@ -95,27 +134,31 @@ READ_CONTEXT_TOOL = {
     "function": {
         "name": "read_context",
         "description": (
-            "Read one file from this workspace's context model: curated "
+            "Read files from this workspace's context model: curated "
             "documentation of what the business's data means. The available "
             "paths are listed in the WORKSPACE CONTEXT MODEL section of your "
             "prompt. Read the ontology file for an entity before deciding which "
             "table holds it, and the playbook for a question type before "
-            "writing SQL for it. These files are authoritative for definitions, "
+            "writing SQL for it. Batch every file you expect to need into ONE "
+            "call (up to 4 paths) on your first step — each separate call "
+            "costs a full turn. These files are authoritative for definitions, "
             "metric formulas and exclusions; the catalog is authoritative for "
             "which columns exist."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "path": {
-                    "type": "string",
+                "paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
                     "description": (
-                        "File path exactly as listed, e.g. 'ontology/orders.md' "
-                        "or 'playbooks/churn.md'."
+                        "File paths exactly as listed, e.g. "
+                        "['ontology/orders.md', 'playbooks/churn.md']. "
+                        f"Up to {_READ_CONTEXT_MAX_PATHS} per call."
                     ),
                 },
             },
-            "required": ["path"],
+            "required": ["paths"],
         },
     },
 }
@@ -148,20 +191,28 @@ class LoopResult:
         return {q["dataset_id"]: q.get("source", "") for q in self.queries}
 
 
-def _json_safe(value: Any) -> Any:
-    if isinstance(value, (str, int, float, bool)) or value is None:
-        return value
-    return str(value)
+# One JSON-safety implementation project-wide: the model's tool payloads get
+# the same NaN→null / NUL-stripping treatment as the wire and the JSONB
+# columns. The old local helper stringified NaN to "nan", which the model then
+# read as a value. Types that merely lack an encoding (datetime, Decimal) are
+# left for the surrounding dumps(default=str).
+_json_safe = jsonsafe.json_safe
 
 
-def _serialize_result(dataset_id: str, source: str, result: QueryResult) -> str:
+def _serialize_result(
+    dataset_id: str,
+    source: str,
+    result: QueryResult,
+    rows_to_show: int = _ROWS_TO_MODEL,
+    note: str | None = None,
+) -> str:
     """Compact JSON payload of a captured query result for the model.
 
     Includes ``dataset_id`` so the model knows how to reference this data from
     an authoring block later, and ``source`` so it can tell two similarly
     shaped datasets from different warehouses apart.
     """
-    shown = result.rows[:_ROWS_TO_MODEL]
+    shown = result.rows[:rows_to_show]
     payload = {
         "dataset_id": dataset_id,
         "source": source,
@@ -172,11 +223,17 @@ def _serialize_result(dataset_id: str, source: str, result: QueryResult) -> str:
         "truncated": result.truncated or result.row_count > len(shown),
         "sql_executed": result.sql,
     }
+    if note:
+        payload["note"] = note
     return json.dumps(payload, default=str)
 
 
 def _describe(
-    ctx: "TenantContext", source: str | None, table: str, emit: EventFn
+    ctx: "TenantContext",
+    source: str | None,
+    table: str,
+    emit: EventFn,
+    seen_context: dict[str, int] | None = None,
 ) -> str:
     """Handle a ``describe_source`` call, as a tool-shaped string either way."""
     emit("status", {"message": f"Inspecting {source or 'default'}.{table}…"})
@@ -196,16 +253,55 @@ def _describe(
     # table, so the ontology file covering it is a free hit: no extra round
     # trip, no extra tool call. Kept under a SEPARATE key and never merged into
     # "detail" -- a curated human claim must not read as an introspected fact.
+    # A body already delivered this run (the loop resends its whole history
+    # every turn, so it is still in front of the model) collapses to a pointer:
+    # describing three tables covered by one ontology file must not pay for
+    # that file three times.
     covering = ctx.context_model.covering(ref.name, table)[:2]
     if covering:
-        payload["context_files"] = [
-            {"path": f.path, "body_md": f.body_md[:4000]} for f in covering
-        ]
+        rendered = []
+        for f in covering:
+            entry = _context_payload(f, _CONTEXT_BODY_CHARS, seen_context)
+            entry.pop("summary", None)  # describe already carries the real facts
+            rendered.append(entry)
+        payload["context_files"] = rendered
     return json.dumps(payload)
 
 
-def _read_context(ctx: "TenantContext", path: str, emit: EventFn) -> str:
-    """Handle a ``read_context`` call, as a tool-shaped string either way.
+def _context_payload(
+    found: Any, cap: int, seen_context: dict[str, int] | None
+) -> dict[str, Any]:
+    """One context file as a tool payload, deduplicated across the run.
+
+    ``seen_context`` maps path -> chars already delivered this run. The loop
+    resends its whole history every turn, so a body handed over once is still
+    in front of the model; re-sending it is pure token cost. A repeat request
+    collapses to a pointer — unless this request's cap would deliver MORE of
+    the file than before (an explicit ``read_context`` after a clipped
+    ``describe_source`` attachment), which is a real upgrade and goes through.
+    """
+    would_send = min(len(found.body_md), cap)
+    if seen_context is not None:
+        if seen_context.get(found.path, 0) >= would_send:
+            return {
+                "path": found.path,
+                "summary": found.summary,
+                "note": (
+                    "body already provided in an earlier tool result this "
+                    "run — re-read it there"
+                ),
+            }
+        seen_context[found.path] = would_send
+    return {"path": found.path, "body_md": clip_text(found.body_md, cap)}
+
+
+def _read_context(
+    ctx: "TenantContext",
+    path: str,
+    emit: EventFn,
+    seen_context: dict[str, int] | None = None,
+) -> str:
+    """Handle a single-path ``read_context`` call, as a tool-shaped string.
 
     Reads only ``ctx.context_model`` -- a frozen tuple loaded on the request
     thread -- so this is safe on the daemon worker and touches no session.
@@ -220,7 +316,50 @@ def _read_context(ctx: "TenantContext", path: str, emit: EventFn) -> str:
         return json.dumps(
             {"error": f"No context file {path!r}. Available files: {known}"}
         )
-    return json.dumps({"path": found.path, "detail": found.body_md})
+    entry = _context_payload(found, _READ_CONTEXT_BODY_CHARS, seen_context)
+    if "body_md" in entry:
+        entry["detail"] = entry.pop("body_md")
+    return json.dumps(entry)
+
+
+def _read_context_batch(
+    ctx: "TenantContext",
+    paths: list[Any],
+    emit: EventFn,
+    seen_context: dict[str, int] | None = None,
+) -> str:
+    """Handle a multi-path ``read_context`` call in one tool result.
+
+    One batched call replaces N sequential turns, and every turn is a full API
+    round trip that resends the whole history — this is where the retrieval
+    savings actually come from. Per-file misses are reported per file, so one
+    typo does not void the files that did resolve.
+    """
+    named = [str(p) for p in paths if str(p).strip()]
+    wanted = named[:_READ_CONTEXT_MAX_PATHS]
+    emit("status", {"message": f"Reading context {', '.join(wanted) or '(empty)'}…"})
+    model = ctx.context_model
+    if not wanted:
+        known = ", ".join(model.paths[:40]) or "(none)"
+        return json.dumps({"error": f"No paths given. Available files: {known}"})
+    files: list[dict[str, Any]] = []
+    for p in wanted:
+        found = model.get(p)
+        if found is None:
+            known = ", ".join(model.paths[:40]) or "(none)"
+            files.append(
+                {"path": p, "error": f"No context file {p!r}. Available files: {known}"}
+            )
+            continue
+        entry = _context_payload(found, _READ_CONTEXT_BODY_CHARS, seen_context)
+        if "body_md" in entry:
+            entry["detail"] = entry.pop("body_md")
+        files.append(entry)
+    if len(named) > len(wanted):
+        files.append(
+            {"error": f"Only the first {_READ_CONTEXT_MAX_PATHS} paths were read."}
+        )
+    return json.dumps({"files": files})
 
 
 def run_capture_loop(
@@ -232,6 +371,8 @@ def run_capture_loop(
     start_index: int = 1,
     model: str | None = None,
     openai: Any | None = None,
+    deadline_s: float | None = None,
+    error_budget: int = 3,
 ) -> LoopResult:
     """Drive the tool-calling loop, capturing each successful query as a dataset.
 
@@ -239,6 +380,18 @@ def run_capture_loop(
     it is mutated in place. Datasets are keyed ``q{n}`` starting at
     ``start_index``. When the model stops calling tools, its final message text
     is returned in :attr:`LoopResult.final_content`.
+
+    ``deadline_s`` is a soft wall-clock budget: a step that would start past it
+    jumps to the same forced-finalize path as running out of steps, so a slow
+    warehouse bounds the run instead of stretching it. Data already captured is
+    kept either way.
+
+    ``error_budget`` keeps failed turns from starving the run of real work: a
+    turn whose ``run_sql`` calls ALL errored is refunded — it burns one unit of
+    this budget instead of a step — so a model recovering from a dialect
+    misunderstanding still gets its ``max_steps`` of productive turns. Once the
+    budget is gone, failed turns consume steps again, so a true failure loop is
+    bounded by ``max_steps + error_budget`` turns total.
 
     Both the OpenAI client and every warehouse come from ``ctx``, so a loop can
     only ever touch the data of the org it was started for.
@@ -259,9 +412,55 @@ def run_capture_loop(
     datasets: dict[str, QueryResult] = {}
     queries: list[dict[str, Any]] = []
     idx = start_index
+    started = time.monotonic()
+    # ``step`` counts turns against max_steps (all-error turns are refunded);
+    # ``turn`` counts every assistant turn, so compaction ages never stall.
+    step = 0
+    turn = 0
+    errors_forgiven = 0
+    # Large run_sql tool results eligible for one-time compaction (see the
+    # _COMPACT_* constants): {index, turn, dataset_id, source, result}.
+    compactable: list[dict[str, Any]] = []
+    # path -> chars of that context body already delivered this run. History is
+    # resent every turn, so a body sent once stays visible; repeats collapse to
+    # a pointer instead of being paid for again (see _context_payload).
+    seen_context: dict[str, int] = {}
 
-    for step in range(1, max_steps + 1):
-        emit("status", {"message": f"Querying (step {step})…"})
+    while step < max_steps:
+        if deadline_s is not None and time.monotonic() - started > deadline_s:
+            emit("status", {"message": "Time budget reached…"})
+            break
+        step += 1
+        turn += 1
+        # step/max_steps let the UI show an honest turn counter; steps count
+        # assistant turns, not queries — a batched turn runs several queries.
+        emit(
+            "status",
+            {
+                "message": f"Querying (step {step})…",
+                "step": step,
+                "max_steps": max_steps,
+            },
+        )
+        if compactable:
+            still_fresh = []
+            for entry in compactable:
+                if turn - entry["turn"] <= _COMPACT_AFTER_TURNS:
+                    still_fresh.append(entry)
+                    continue
+                messages[entry["index"]]["content"] = _serialize_result(
+                    entry["dataset_id"],
+                    entry["source"],
+                    entry["result"],
+                    rows_to_show=_COMPACT_KEEP_ROWS,
+                    note=(
+                        "older rows compacted — the full result is still "
+                        f"captured as {entry['dataset_id']} and blocks can "
+                        "reference it"
+                    ),
+                )
+            # Dropped from the list, so a message is rewritten exactly once.
+            compactable = still_fresh
         resp = client.chat.completions.create(
             model=model,
             messages=messages,
@@ -296,25 +495,97 @@ def run_capture_loop(
             }
         )
 
+        parsed: list[tuple[Any, dict[str, Any]]] = []
         for tc in msg.tool_calls:
             try:
                 args = json.loads(tc.function.arguments or "{}")
             except json.JSONDecodeError:
                 args = {}
-            source = args.get("source") or None
+            parsed.append((tc, args))
 
+        # The analyst prompt tells the model to batch a whole row of widget
+        # queries into one turn, and each statement targets one warehouse
+        # through clients built for concurrent use — so a batched turn runs its
+        # SQL concurrently. Dataset numbering stays what it always was: ids are
+        # assigned after the batch, in tool_calls order, to successes only.
+        # describe_source/read_context stay inline: they are cheap (catalog
+        # cache, in-memory context model) and share the seen_context state.
+        sql_positions = [
+            i
+            for i, (tc, _) in enumerate(parsed)
+            if tc.function.name not in ("describe_source", "read_context")
+        ]
+        for i in sql_positions:
+            tc, args = parsed[i]
+            emit(
+                "sql",
+                {
+                    "query_id": tc.id,
+                    "sql": args.get("sql", ""),
+                    "source": args.get("source") or None,
+                },
+            )
+
+        def _execute_sql(
+            args: dict[str, Any],
+        ) -> tuple[QueryResult | None, str, str, str]:
+            """(result, resolved source, tool error, event error) for one call."""
+            source = args.get("source") or None
+            try:
+                result = run_sql(args.get("sql", ""), ctx=ctx, source=source)
+                return result, ctx.source(source).name, "", ""
+            except UnsafeSQLError as exc:
+                return None, "", f"Rejected: {exc}", f"Rejected SQL: {exc}"
+            except UnknownSourceError as exc:
+                # The model invented a source name. Hand back the real list
+                # so it can retry rather than failing the whole report.
+                return None, "", str(exc), str(exc)
+            except Exception as exc:  # noqa: BLE001 - feed DB errors to the model
+                return None, "", str(exc), str(exc)
+
+        outcomes: dict[int, tuple[QueryResult | None, str, str, str]] = {}
+        if len(sql_positions) > 1:
+            with ThreadPoolExecutor(
+                max_workers=min(4, len(sql_positions))
+            ) as pool:
+                futures = {
+                    i: pool.submit(_execute_sql, parsed[i][1])
+                    for i in sql_positions
+                }
+                for i, fut in futures.items():
+                    outcomes[i] = fut.result()
+        elif sql_positions:
+            i = sql_positions[0]
+            outcomes[i] = _execute_sql(parsed[i][1])
+
+        for i, (tc, args) in enumerate(parsed):
+            captured: tuple[str, str, QueryResult] | None = None
             if tc.function.name == "describe_source":
-                tool_content = _describe(ctx, source, args.get("table", ""), emit)
+                tool_content = _describe(
+                    ctx,
+                    args.get("source") or None,
+                    args.get("table", ""),
+                    emit,
+                    seen_context,
+                )
             elif tc.function.name == "read_context":
-                tool_content = _read_context(ctx, args.get("path", ""), emit)
+                raw_paths = args.get("paths")
+                if isinstance(raw_paths, list):
+                    tool_content = _read_context_batch(
+                        ctx, raw_paths, emit, seen_context
+                    )
+                else:
+                    # Single-path forms: a bare string under "paths", or the
+                    # older "path" argument some models keep emitting.
+                    single = raw_paths if isinstance(raw_paths, str) else ""
+                    tool_content = _read_context(
+                        ctx, single or args.get("path", ""), emit, seen_context
+                    )
             else:
-                sql = args.get("sql", "")
-                emit("sql", {"sql": sql, "source": source})
-                try:
-                    result = run_sql(sql, ctx=ctx, source=source)
+                result, resolved, tool_err, event_err = outcomes[i]
+                if result is not None:
                     dataset_id = f"q{idx}"
                     idx += 1
-                    resolved = ctx.source(source).name
                     datasets[dataset_id] = result
                     queries.append(
                         {
@@ -326,26 +597,20 @@ def run_capture_loop(
                         }
                     )
                     tool_content = _serialize_result(dataset_id, resolved, result)
+                    captured = (dataset_id, resolved, result)
                     emit(
                         "result",
                         {
+                            "query_id": tc.id,
                             "dataset_id": dataset_id,
                             "source": resolved,
                             "row_count": result.row_count,
                             "columns": result.columns,
                         },
                     )
-                except UnsafeSQLError as exc:
-                    tool_content = json.dumps({"error": f"Rejected: {exc}"})
-                    emit("error", {"message": f"Rejected SQL: {exc}"})
-                except UnknownSourceError as exc:
-                    # The model invented a source name. Hand back the real list
-                    # so it can retry rather than failing the whole report.
-                    tool_content = json.dumps({"error": str(exc)})
-                    emit("error", {"message": str(exc)})
-                except Exception as exc:  # noqa: BLE001 - feed DB errors to the model
-                    tool_content = json.dumps({"error": str(exc)})
-                    emit("error", {"message": str(exc)})
+                else:
+                    tool_content = json.dumps({"error": tool_err})
+                    emit("error", {"query_id": tc.id, "message": event_err})
 
             messages.append(
                 {
@@ -354,8 +619,34 @@ def run_capture_loop(
                     "content": tool_content,
                 }
             )
+            if (
+                captured is not None
+                and len(captured[2].rows[:_ROWS_TO_MODEL]) > _COMPACT_MIN_ROWS
+            ):
+                compactable.append(
+                    {
+                        "index": len(messages) - 1,
+                        "turn": turn,
+                        "dataset_id": captured[0],
+                        "source": captured[1],
+                        "result": captured[2],
+                    }
+                )
 
-    # Ran out of steps: ask for the final answer with what was gathered.
+        # A turn whose run_sql calls ALL failed taught the model something
+        # (the errors went back as tool content) but produced nothing; refund
+        # the step while the error budget lasts.
+        sql_outcomes = [outcomes[i][0] for i in sql_positions]
+        if (
+            sql_outcomes
+            and all(r is None for r in sql_outcomes)
+            and errors_forgiven < error_budget
+        ):
+            errors_forgiven += 1
+            step -= 1
+
+    # Ran out of steps (or of wall-clock): ask for the final answer with what
+    # was gathered.
     emit("status", {"message": "Finalizing…"})
     messages.append(
         {
@@ -368,7 +659,7 @@ def run_capture_loop(
         datasets=datasets,
         queries=queries,
         final_content=resp.choices[0].message.content or "",
-        steps=max_steps,
+        steps=step,
     )
 
 

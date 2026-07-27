@@ -34,6 +34,11 @@ function seed(source: DataSource, existing: ConnectionPublic | null): Connection
       database: String(existing.database ?? source.defaults.database),
       secure: Boolean(existing.secure),
       sslmode: (existing.sslmode as ConnectionInput["sslmode"]) ?? null,
+      // Not edited here -- the scope has its own screen -- but carried so that
+      // saving a credential change sends it back unchanged. The API takes whole
+      // connections, so omitting these would silently clear the scope.
+      introspect_databases: (existing.introspect_databases as string[]) ?? [],
+      introspect_tables: (existing.introspect_tables as string[]) ?? [],
     };
   }
   return {
@@ -41,6 +46,8 @@ function seed(source: DataSource, existing: ConnectionPublic | null): Connection
     name: "",
     description: "",
     is_default: false,
+    introspect_databases: [],
+    introspect_tables: [],
     ...source.defaults,
   };
 }

@@ -87,3 +87,24 @@ def test_dashboard_analyze_persists(client, monkeypatch):
 def test_dashboard_analyze_missing_404(client, monkeypatch):
     monkeypatch.setattr(web, "analyze_dashboard", lambda document, **kw: "x")
     assert client.post("/api/dashboards/9999/analyze", json={}).status_code == 404
+
+
+def test_dashboard_insights_survive_to_the_detail_endpoint(client, monkeypatch):
+    doc = _doc()
+    insights = {"insights": [{"dataset_id": "q1", "finding": "up", "importance": 2}],
+                "lead": ["q1"]}
+    monkeypatch.setattr(
+        web,
+        "generate_dashboard",
+        lambda request, **kw: DashboardResult(
+            request=request, document=doc, queries=[], steps=1, insights=insights
+        ),
+    )
+    with client.stream("POST", "/api/dashboard", json={"request": "d"}) as resp:
+        saved_id = next(
+            json.loads(ln)["data"]["dashboard_id"]
+            for ln in resp.iter_lines()
+            if ln and json.loads(ln)["kind"] == "saved"
+        )
+
+    assert client.get(f"/api/dashboards/{saved_id}").json()["insights"] == insights

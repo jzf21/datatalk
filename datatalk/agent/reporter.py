@@ -12,7 +12,7 @@ from datatalk.agent.blocks import Document, parse_json_object
 from datatalk.agent.context_block import build_context_block
 from datatalk.agent.planner import Section, plan_to_text
 from datatalk.agent.sqlloop import dataset_previews
-from datatalk.llm.prompts import BLOCK_SCHEMA_DOC, REPORTER_SYSTEM, _ANTI_FABRICATION
+from datatalk.llm.prompts import BLOCK_SCHEMA_DOC, REPORTER_SYSTEM, ANTI_FABRICATION
 
 if TYPE_CHECKING:
     from datatalk.context import TenantContext
@@ -25,16 +25,23 @@ def write_report(
     *,
     ctx: "TenantContext",
     sources: dict[str, str] | None = None,
+    memory_block: str = "",
+    queries: list[dict] | None = None,
 ) -> Document:
     """Return an *authoring* Document referencing the captured datasets by id.
 
     ``sources`` maps dataset id to the source it came from, so the Reporter can
-    say which warehouse a block's numbers are drawn from.
+    say which warehouse a block's numbers are drawn from. ``memory_block``
+    carries learned user guidance — it shapes wording and units, which are
+    decided here rather than upstream. ``queries`` (the Analyst's captured
+    query records) selects which ontology/playbook bodies are worth injecting:
+    the ones covering the tables this report actually drew from.
     """
     system = REPORTER_SYSTEM.format(
         block_schema=BLOCK_SCHEMA_DOC,
-        anti_fabrication=_ANTI_FABRICATION,
-        context_block=build_context_block(ctx),
+        anti_fabrication=ANTI_FABRICATION,
+        context_block=build_context_block(ctx, queries=queries),
+        memory_block=memory_block,
     )
     user = (
         f"User request:\n{request}\n\n"

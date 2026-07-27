@@ -113,3 +113,111 @@ def test_bad_dataset_reference_degrades_not_raises(monkeypatch):
 
     assert isinstance(result.document.blocks[0], Paragraph)
     assert "unavailable" in result.document.blocks[0].text
+
+
+def test_the_report_path_still_uses_the_report_prompts(monkeypatch):
+    """The dashboard's prompt overrides must not have leaked into reports.
+
+    ``plan_report`` and ``gather_data`` grew a ``system_prompt`` parameter for
+    the dashboard. Its default is the report prompt, and this is the assertion
+    that keeps it that way.
+    """
+    plan_json = json.dumps(
+        {"sections": [{"id": "s", "title": "S", "goal": "g", "data_questions": ["q?"]}]}
+    )
+    scripted = [
+        _response(_message(content=plan_json)),
+        _response(_message(content="Data gathering complete.")),
+        _response(_message(content=json.dumps({"blocks": [{"type": "paragraph", "text": "hi"}]}))),
+    ]
+    ctx = make_ctx(openai=FakeOpenAI(scripted))
+    monkeypatch.setattr(report_mod, "build_catalog", lambda ctx, **kw: "SOURCE main [clickhouse]")
+
+    report_mod.generate_report("anything", ctx=ctx)
+    kwargs = ctx.openai.chat.completions.kwargs
+
+    planner_system = kwargs[0]["messages"][0]["content"]
+    assert "reporting pipeline" in planner_system
+    assert "DASHBOARD" not in planner_system
+
+    analyst_system = kwargs[1]["messages"][0]["content"]
+    assert "reporting pipeline" in analyst_system
+    assert "DASHBOARD" not in analyst_system
+
+
+def test_the_reporter_sees_user_guidance(monkeypatch):
+    """Learned guidance shapes wording and units, which the Reporter decides."""
+    plan_json = json.dumps(
+        {"sections": [{"id": "s", "title": "S", "goal": "g", "data_questions": ["q?"]}]}
+    )
+    scripted = [
+        _response(_message(content=plan_json)),
+        _response(_message(content="Data gathering complete.")),
+        _response(_message(content=json.dumps({"blocks": [{"type": "paragraph", "text": "hi"}]}))),
+    ]
+    ctx = make_ctx(openai=FakeOpenAI(scripted))
+    monkeypatch.setattr(report_mod, "build_catalog", lambda ctx, **kw: "SOURCE main [clickhouse]")
+
+    report_mod.generate_report(
+        "anything", ctx=ctx, memory_suggestions=["Report revenue in millions"])
+
+    reporter_system = ctx.openai.chat.completions.kwargs[-1]["messages"][0]["content"]
+    assert "Report revenue in millions" in reporter_system
+
+
+def test_a_deferred_memory_fetch_reaches_the_agents_and_emits_the_event(monkeypatch):
+    """memory_suggestions_fn overlaps build_catalog; its result must still land
+    in every agent prompt and surface as a `memory` stream event."""
+    plan_json = json.dumps(
+        {"sections": [{"id": "s", "title": "S", "goal": "g", "data_questions": ["q?"]}]}
+    )
+    scripted = [
+        _response(_message(content=plan_json)),
+        _response(_message(content="Data gathering complete.")),
+        _response(_message(content=json.dumps({"blocks": [{"type": "paragraph", "text": "hi"}]}))),
+    ]
+    ctx = make_ctx(openai=FakeOpenAI(scripted))
+    monkeypatch.setattr(report_mod, "build_catalog", lambda ctx, **kw: "SOURCE main [clickhouse]")
+    events = []
+
+    report_mod.generate_report(
+        "anything",
+        ctx=ctx,
+        memory_suggestions_fn=lambda: ["Report revenue in millions"],
+        on_event=lambda k, d: events.append((k, d)),
+    )
+
+    memory_events = [d for k, d in events if k == "memory"]
+    assert memory_events == [
+        {"count": 1, "suggestions": ["Report revenue in millions"]}
+    ]
+    reporter_system = ctx.openai.chat.completions.kwargs[-1]["messages"][0]["content"]
+    assert "Report revenue in millions" in reporter_system
+
+
+def test_a_crashing_memory_fetch_degrades_to_no_suggestions(monkeypatch):
+    """Memory is best-effort: a dead embeddings endpoint must not kill the run."""
+    plan_json = json.dumps(
+        {"sections": [{"id": "s", "title": "S", "goal": "g", "data_questions": ["q?"]}]}
+    )
+    scripted = [
+        _response(_message(content=plan_json)),
+        _response(_message(content="Data gathering complete.")),
+        _response(_message(content=json.dumps({"blocks": [{"type": "paragraph", "text": "hi"}]}))),
+    ]
+    ctx = make_ctx(openai=FakeOpenAI(scripted))
+    monkeypatch.setattr(report_mod, "build_catalog", lambda ctx, **kw: "SOURCE main [clickhouse]")
+    events = []
+
+    def boom():
+        raise RuntimeError("embeddings down")
+
+    result = report_mod.generate_report(
+        "anything",
+        ctx=ctx,
+        memory_suggestions_fn=boom,
+        on_event=lambda k, d: events.append((k, d)),
+    )
+
+    assert result.document.blocks
+    assert not [k for k, _ in events if k == "memory"]

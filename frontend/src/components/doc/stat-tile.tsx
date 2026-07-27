@@ -1,6 +1,7 @@
 import { ArrowDown, ArrowUp } from "lucide-react";
 
 import type { StatBlock } from "@/lib/api/types";
+import { deltaTone } from "@/lib/doc/stat";
 import { formatCompact, toNumber } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { TickChip } from "./tick-chip";
@@ -19,6 +20,9 @@ export function StatTile({ block }: { block: StatBlock }) {
   const deltaPct = block.delta_pct ?? null;
   const rising = delta !== null && delta > 0;
   const falling = delta !== null && delta < 0;
+  // The arrow and word follow the sign; the colour follows goodness, because
+  // a falling churn rate is the good news.
+  const tone = deltaTone(delta, block.direction);
 
   return (
     <div className="flex h-full flex-col border-t border-border-strong pt-3">
@@ -42,9 +46,9 @@ export function StatTile({ block }: { block: StatBlock }) {
         <p
           className={cn(
             "mt-1.5 flex items-center gap-1 text-[12px]",
-            rising && "text-status-good-text",
-            falling && "text-destructive",
-            !rising && !falling && "text-ink-secondary",
+            tone === "good" && "text-status-good-text",
+            tone === "bad" && "text-destructive",
+            tone === "neutral" && "text-ink-secondary",
           )}
         >
           {rising && <ArrowUp className="size-3" aria-hidden />}
