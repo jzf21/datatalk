@@ -17,9 +17,12 @@ import { useSources } from "./sources-context";
  */
 export function TickChip({
   datasetId,
+  variant = "paper",
   className,
 }: {
   datasetId?: string;
+  /** "terminal" wears the pulse-teal badge on the dark data plane. */
+  variant?: "paper" | "terminal";
   className?: string;
 }) {
   const sources = useSources();
@@ -38,9 +41,13 @@ export function TickChip({
       aria-label={`Show the query behind this: ${datasetId}`}
       className={cn(
         "cite rounded-[2px] px-1 py-px leading-none transition-colors duration-[120ms]",
-        active
-          ? "bg-ring/12 text-link"
-          : "text-ink-tertiary hover:bg-accent hover:text-ink-primary",
+        variant === "terminal"
+          ? active
+            ? "bg-pulse/25 text-pulse"
+            : "bg-pulse/12 text-pulse hover:bg-pulse/20"
+          : active
+            ? "bg-ring/12 text-link"
+            : "text-ink-tertiary hover:bg-accent hover:text-ink-primary",
         className,
       )}
     >

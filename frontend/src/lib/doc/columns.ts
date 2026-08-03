@@ -16,6 +16,12 @@ export interface ColumnMeta {
   decimals: number;
   /** Name-inferred ratio column (0..1) that should read as a percentage. */
   percent: boolean;
+  /**
+   * Numeric column containing at least one negative value. Mixed signs mean
+   * the column is a delta/amount, so its values render as credit/debit pills;
+   * unsigned measures stay plain -- colouring every number would be noise.
+   */
+  signed: boolean;
 }
 
 const PERCENT_NAME = /(pct|percent|percentage|rate|ratio|share)/i;
@@ -60,7 +66,10 @@ export function inferColumns(
         return n !== null && n >= 0 && n <= 1;
       });
 
-    return { name, kind, decimals, percent };
+    const signed =
+      kind === "number" && values.some((v) => (toNumber(v) ?? 0) < 0);
+
+    return { name, kind, decimals, percent, signed };
   });
 }
 

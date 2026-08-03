@@ -49,15 +49,46 @@ hue family** for all chrome; color is reserved for data.
   *lightness only* (`--card`, `--popover`). Ink has four levels (`--ink-primary` →
   `--ink-disabled`) and all four get used — hierarchy comes from ink level, not from
   boxes and borders.
-- **Chrome is colorless.** The sidebar sits on the *same plane* as the canvas, divided by
-  a single hairline. Do not introduce a "sidebar surface" or a brand-colored header.
-- **One accent: the stamp blue** (`--link` / `--ring`) for links, focus, selection. It is
-  deliberately darker than `--chart-1` so it can never be mistaken for a data series.
+- **Chrome surfaces stay colorless.** The sidebar sits on the *same plane* as the canvas,
+  divided by a single hairline. Do not introduce a "sidebar surface" or a brand-colored
+  header. Hue enters the chrome only through the two accents below — as a *fill on a
+  control*, never as a plane.
+- **Two accents, two jobs, and that is the whole list.**
+  - **Ledger green** (`--primary`) is *action*: the filled button, the default badge, a
+    checked box, a thrown switch. It is deep and low-chroma — `oklch(0.44 0.085 155)`,
+    a full 0.09 below `--chart-6`/`--status-good` in both lightness and chroma and 12°
+    off their hue — so a button can never be misread as a series mark or as "good".
+    Companions: `--primary-hover` (darker, so hover never *fades* toward the paper),
+    `--primary-tint` (soft fill), `--primary-text` (green as text on paper, 8.13:1).
+  - **Stamp blue** (`--link` / `--ring`) is *navigation and focus*: links, focus rings,
+    selection. Deliberately darker than `--chart-1` so it is never a data series.
+  - Green fills, blue links. A green link or a blue button is a bug.
 - **Data color is off-limits for decoration.** `--chart-1…8` and the status hues exist
-  only inside charts and status. Never use a chart hue for a button, tag, or accent.
-- **No terracotta, no gradient accents, no colored hero.** The warmth comes from the paper
-  and the serif, not from a hue. (This is what keeps the cream-serif look from reading as
-  a template.)
+  only inside charts and status. Never use a chart hue for a button, tag, or accent —
+  and never reach for `--status-good` when you mean `--primary`.
+- **No gradient accents, no colored hero, no colored page or sidebar.** The warmth comes
+  from the paper and the serif; the green is a mark *on* that paper, not a wash over it.
+  (This is what keeps the cream-serif look from reading as a template.)
+
+### 2b. The terminal plane — where color lives
+
+Machine output renders on its own dark surface: **the terminal figure** (`--terminal`,
+`--terminal-raised`, the `--terminal-ink` levels, `--terminal-border`). It is a cool
+night slate set into the warm page — a screen embedded in print — and it is the *only*
+place the UI goes dark. The chrome around it stays paper.
+
+Color on that plane (and its paper-side echoes) has exactly three jobs:
+
+- **Credit / debit** (`--credit` mint, `--debit` soft red): values in *signed* numeric
+  columns render as tinted pills. Unsigned measures stay plain ink — coloring every
+  number is noise, and the sign character stays in the text so color never carries the
+  meaning alone.
+- **The pulse teal** (`--pulse` on slate, `--pulse-text` on paper): "verified against a
+  captured query." Tick chips on the terminal figure, resolved dataset ids in the run
+  log, the live shimmer. It is the trust mark, nothing else.
+- **Pending amber** (`--status-warning`, pre-existing): a query in flight, a retry.
+
+None of these are ever used decoratively, and never on buttons, nav, or chrome.
 
 ---
 
@@ -73,7 +104,7 @@ hue family** for all chrome; color is reserved for data.
 
 ---
 
-## 4. The signature: the hero composer
+## 4. The signatures: the hero composer & the terminal figure
 
 The one memorable object. It's how the Claude-app calm enters the product.
 
@@ -96,6 +127,12 @@ The one memorable object. It's how the Claude-app calm enters the product.
 - The box is the only elevated in-flow element on the page. Everything else stays flat.
 - Empty states elsewhere (empty library, no connection) borrow the same shape: a serif
   headline + one plain sentence + one action. An empty screen is an invitation to act.
+
+The second signature is the **terminal figure** (§2b): data tables sit on the dark
+terminal plane, `rounded-[10px]`, no border (the plane defines itself), with a raised
+caption band, white-alpha hairlines, and value/status color inside. Use the `.terminal`
+component class — it sets `color-scheme: dark` (native scrollbars) and swaps the focus
+ring to the pulse teal, since the stamp blue disappears on slate.
 
 ---
 

@@ -47,7 +47,7 @@ export function GenerationProgress({
       {streaming && (
         <div className="flex items-center gap-3">
           <span className="h-0.5 flex-1 overflow-hidden rounded-full bg-muted">
-            <span className="shimmer block h-full w-full" />
+            <span className="shimmer-live block h-full w-full" />
           </span>
           <Button variant="outline" size="sm" onClick={onStop}>
             Stop watching

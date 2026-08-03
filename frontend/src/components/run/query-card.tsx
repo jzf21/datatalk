@@ -34,12 +34,14 @@ export function QueryCard({
       )}
     >
       <div className="flex items-center gap-2 px-3 py-2">
+        {/* The tie-out mark's ledger states: amber-dashed while the query is
+            in flight, the verified teal once its dataset is captured. */}
         <span
           className={cn(
             "cite shrink-0 rounded-[2px] px-1 leading-none",
             running
-              ? "border border-dashed border-border-strong text-ink-disabled"
-              : "bg-accent text-ink-secondary",
+              ? "border border-dashed border-[var(--status-warning)] text-ink-tertiary"
+              : "bg-pulse-text/10 text-pulse-text",
           )}
         >
           {step.datasetId ?? "··"}
@@ -76,7 +78,7 @@ export function QueryCard({
             role="progressbar"
             aria-label="Query running"
           >
-            <span className="shimmer block h-full w-full" />
+            <span className="shimmer-live block h-full w-full" />
           </span>
         ) : (
           <span className="cite shrink-0 text-ink-tertiary">

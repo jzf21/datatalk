@@ -43,6 +43,16 @@
   --color-status-warning: var(--status-warning);
   --color-status-serious: var(--status-serious);
   --color-status-critical: var(--status-critical);
+  --color-terminal: var(--terminal);
+  --color-terminal-raised: var(--terminal-raised);
+  --color-terminal-ink: var(--terminal-ink);
+  --color-terminal-ink-dim: var(--terminal-ink-dim);
+  --color-terminal-ink-faint: var(--terminal-ink-faint);
+  --color-terminal-border: var(--terminal-border);
+  --color-credit: var(--credit);
+  --color-debit: var(--debit);
+  --color-pulse: var(--pulse);
+  --color-pulse-text: var(--pulse-text);
   --color-ring: var(--ring);
   --color-input: var(--input);
   --color-border: var(--border);
@@ -54,6 +64,9 @@
   --color-secondary-foreground: var(--secondary-foreground);
   --color-secondary: var(--secondary);
   --color-primary-foreground: var(--primary-foreground);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-tint: var(--primary-tint);
+  --color-primary-text: var(--primary-text);
   --color-primary: var(--primary);
   --color-popover-foreground: var(--popover-foreground);
   --color-popover: var(--popover);
@@ -94,9 +107,15 @@
   --border-strong: oklch(0.8445 0.0154 94.2);     /* #CFCCC1 axis / emphasis    */
   --input: oklch(0.8726 0.0140 93.0);             /* #D8D5CB control border     */
 
-  /* Action -- primary is INK, so no brand hue competes with a series hue. */
-  --primary: oklch(0.2477 0.0058 91.6);           /* #22211E */
-  --primary-foreground: oklch(0.9818 0.0054 95.1);/* #FAF9F5 15.28:1 */
+  /* Action -- ledger green. Deep and low-chroma on purpose: it sits a full
+     0.09 in lightness and 0.09 in chroma below --chart-6 (#008300) and
+     --status-good, and 12 deg off their hue, so a button can never be misread
+     as a series mark or a "good" status. */
+  --primary: oklch(0.4400 0.0850 155);            /* #24603D  7.46:1 on white */
+  --primary-foreground: oklch(0.9818 0.0054 95.1);/* #FAF9F5 */
+  --primary-hover: oklch(0.3850 0.0850 155);      /* #11512F  darkens, never fades */
+  --primary-tint: oklch(0.9450 0.0140 155);       /* #E6F0E9 selected/soft fill */
+  --primary-text: oklch(0.4000 0.0900 155);       /* #115531  8.13:1 on cream */
   --secondary: oklch(0.9485 0.0067 97.4);
   --secondary-foreground: oklch(0.2138 0.0042 84.6);
 
@@ -114,6 +133,28 @@
   --status-warning: oklch(0.8110 0.1644 78.5);    /* #FAB219 mark; icon+label mandatory */
   --status-serious: oklch(0.7172 0.1406 41.6);    /* #EC835A */
   --status-critical: oklch(0.5748 0.1862 25.2);   /* #D03B3B 4.68:1 */
+
+  /* --- The terminal plane -----------------------------------------------
+     Machine output (tables, live run figures) renders on a cool night slate
+     set into the warm page -- the one place the UI goes dark, and the only
+     place value colour lives. Cool hue against the warm paper on purpose:
+     it reads as a screen embedded in print. */
+  --terminal: oklch(0.28 0.02 262);               /* table body            */
+  --terminal-raised: oklch(0.225 0.02 262);       /* header/caption band   */
+  --terminal-ink: oklch(0.94 0.008 262);          /* values                */
+  --terminal-ink-dim: oklch(0.74 0.015 262);      /* captions, counts      */
+  --terminal-ink-faint: oklch(0.68 0.018 262);    /* column headers, nulls */
+  --terminal-border: oklch(1 0 0 / 8%);           /* hairlines on slate    */
+
+  /* Value colour -- signed figures only, never decoration. Dark-plane forms;
+     paper surfaces keep --status-good-text / --destructive. */
+  --credit: oklch(0.80 0.16 155);                 /* mint: positive        */
+  --debit: oklch(0.74 0.15 20);                   /* soft red: negative    */
+
+  /* The pulse teal -- "verified against a captured query". Bright form for
+     the terminal plane, dark form for paper surfaces (4.9:1 on cream). */
+  --pulse: oklch(0.80 0.124 180);
+  --pulse-text: oklch(0.51 0.094 180);
 
   /* Chart chrome. */
   --chart-surface: oklch(0.9905 0.0026 106.4);
@@ -140,7 +181,7 @@
 
   --sidebar: oklch(0.9698 0.0054 95.1);           /* same plane as the canvas */
   --sidebar-foreground: oklch(0.2138 0.0042 84.6);
-  --sidebar-primary: oklch(0.2477 0.0058 91.6);
+  --sidebar-primary: oklch(0.4400 0.0850 155);
   --sidebar-primary-foreground: oklch(0.9818 0.0054 95.1);
   --sidebar-accent: oklch(0.9276 0.0137 93.0);
   --sidebar-accent-foreground: oklch(0.2138 0.0042 84.6);
@@ -155,8 +196,13 @@
   --card-foreground: oklch(0.985 0 0);
   --popover: oklch(0.205 0 0);
   --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
+  /* Green lifts on the dark plane and flips to dark text -- at the light-mode
+     lightness it would sink into the surface. */
+  --primary: oklch(0.7200 0.1100 155);            /* #68B986  8.87:1 on ink */
   --primary-foreground: oklch(0.205 0 0);
+  --primary-hover: oklch(0.7800 0.0950 155);
+  --primary-tint: oklch(0.3200 0.0400 155);
+  --primary-text: oklch(0.7600 0.1050 155);
   --secondary: oklch(0.269 0 0);
   --secondary-foreground: oklch(0.985 0 0);
   --muted: oklch(0.269 0 0);
@@ -174,8 +220,8 @@
   --chart-5: oklch(0.269 0 0);
   --sidebar: oklch(0.205 0 0);
   --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.7200 0.1100 155);
+  --sidebar-primary-foreground: oklch(0.205 0 0);
   --sidebar-accent: oklch(0.269 0 0);
   --sidebar-accent-foreground: oklch(0.985 0 0);
   --sidebar-border: oklch(1 0 0 / 10%);
@@ -291,6 +337,19 @@
     box-shadow: var(--shadow-overlay), 0 0 0 4px color-mix(in oklch, var(--ring) 12%, transparent);
   }
 
+  /* --- The terminal figure ----------------------------------------------
+     Machine output on its own dark plane. color-scheme keeps native
+     scrollbars from flashing light inside it; focus swaps to the pulse
+     teal because the stamp blue disappears on slate. */
+  .terminal {
+    background: var(--terminal);
+    color: var(--terminal-ink);
+    color-scheme: dark;
+  }
+  .terminal :focus-visible {
+    outline-color: var(--pulse);
+  }
+
   /* Barely-perceptible sweep: a 4% lightness delta over 1.6s. */
   .shimmer {
     background-image: linear-gradient(
@@ -304,6 +363,18 @@
   }
   @keyframes dt-shimmer {
     to { background-position: -200% 0; }
+  }
+
+  /* The live bar: the same sweep, in the pulse teal -- work is arriving. */
+  .shimmer-live {
+    background-image: linear-gradient(
+      90deg,
+      color-mix(in oklch, var(--pulse-text) 30%, transparent) 0%,
+      color-mix(in oklch, var(--pulse-text) 65%, transparent) 50%,
+      color-mix(in oklch, var(--pulse-text) 30%, transparent) 100%
+    );
+    background-size: 200% 100%;
+    animation: dt-shimmer 1.6s linear infinite;
   }
 }
 
@@ -320,5 +391,9 @@
   .shimmer {
     background-image: none;
     background-color: var(--muted);
+  }
+  .shimmer-live {
+    background-image: none;
+    background-color: color-mix(in oklch, var(--pulse-text) 40%, transparent);
   }
 }

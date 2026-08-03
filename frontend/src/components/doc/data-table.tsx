@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import type { CellValue, TableBlock } from "@/lib/api/types";
 import { formatCount, toNumber } from "@/lib/format";
 import {
+  type ColumnMeta,
   formatCell,
   inferColumns,
   isNumericColumn,
@@ -51,28 +52,32 @@ export function DataTable({ block }: { block: TableBlock }) {
 
   if (columns.length === 0 || allRows.length === 0) {
     return (
-      <figure className="rounded-[6px] border border-border bg-card p-6 text-center">
-        <p className="text-[13px] text-ink-secondary">No rows returned.</p>
-        <TickChip datasetId={block.dataset_id} className="mt-2 inline-block" />
+      <figure className="terminal rounded-[10px] p-6 text-center">
+        <p className="text-[13px] text-terminal-ink-dim">No rows returned.</p>
+        <TickChip
+          datasetId={block.dataset_id}
+          variant="terminal"
+          className="mt-2 inline-block"
+        />
       </figure>
     );
   }
 
   return (
-    <figure className="rounded-[6px] border border-border bg-card">
-      <figcaption className="flex items-center justify-between gap-3 px-3 py-2">
-        <span className="cite text-ink-tertiary">
+    <figure className="terminal overflow-hidden rounded-[10px]">
+      <figcaption className="flex items-center justify-between gap-3 bg-terminal-raised px-3 py-2">
+        <span className="cite text-terminal-ink-dim">
           {formatCount(allRows.length, "row")} ·{" "}
           {formatCount(columns.length, "column")}
         </span>
         <span className="flex items-center gap-1">
-          <TickChip datasetId={block.dataset_id} />
+          <TickChip datasetId={block.dataset_id} variant="terminal" />
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button
                 variant="ghost"
                 size="icon"
-                className="size-6"
+                className="size-6 text-terminal-ink-dim hover:bg-white/8 hover:text-terminal-ink"
                 aria-label="Table actions"
               >
                 <MoreHorizontal className="size-3.5" />
@@ -98,7 +103,7 @@ export function DataTable({ block }: { block: TableBlock }) {
 
       <div
         className={cn(
-          "overflow-x-auto border-t border-border",
+          "overflow-x-auto border-t border-terminal-border",
           // Only trap a scroll once the table is actually long.
           allRows.length > 20 && "max-h-[560px] overflow-y-auto",
         )}
@@ -107,7 +112,7 @@ export function DataTable({ block }: { block: TableBlock }) {
           <caption className="sr-only">
             {formatCount(allRows.length, "row")} of query results
           </caption>
-          <thead className="sticky top-0 z-10 bg-muted">
+          <thead className="sticky top-0 z-10 bg-terminal-raised">
             <tr>
               {columns.map((name, i) => {
                 const meta = metas[i];
@@ -125,7 +130,7 @@ export function DataTable({ block }: { block: TableBlock }) {
                           : "none"
                     }
                     className={cn(
-                      "label-caps whitespace-nowrap border-b border-border-strong px-3 py-2 text-ink-secondary",
+                      "label-caps whitespace-nowrap border-b border-terminal-border px-3 py-2 text-terminal-ink-faint",
                       // Headers adopt their cells' alignment.
                       numeric ? "text-right" : "text-left",
                     )}
@@ -134,7 +139,7 @@ export function DataTable({ block }: { block: TableBlock }) {
                       type="button"
                       onClick={() => setSort(nextSort(sort, i))}
                       className={cn(
-                        "inline-flex items-center gap-1 hover:text-ink-primary",
+                        "inline-flex items-center gap-1 hover:text-terminal-ink",
                         numeric && "flex-row-reverse",
                       )}
                     >
@@ -155,9 +160,9 @@ export function DataTable({ block }: { block: TableBlock }) {
               <tr
                 key={r}
                 className={cn(
-                  "border-b border-border last:border-b-0 hover:bg-accent/50",
+                  "border-b border-terminal-border last:border-b-0 hover:bg-white/[0.04]",
                   // The greenbar nod: so quiet you feel it rather than see it.
-                  allRows.length > 12 && r % 2 === 1 && "bg-background/40",
+                  allRows.length > 12 && r % 2 === 1 && "bg-black/10",
                 )}
               >
                 {columns.map((name, c) => {
@@ -167,14 +172,14 @@ export function DataTable({ block }: { block: TableBlock }) {
                       key={name + c}
                       title={rawCellTitle(row[c], meta)}
                       className={cn(
-                        "px-3 py-1.5 text-ink-primary",
+                        "px-3 py-1.5 text-terminal-ink",
                         isNumericColumn(meta)
                           ? "text-right tabular-nums"
                           : "text-left",
-                        row[c] === null && "text-ink-disabled",
+                        row[c] === null && "text-terminal-ink-faint",
                       )}
                     >
-                      {formatCell(row[c], meta)}
+                      <Cell value={row[c]} meta={meta} />
                     </td>
                   );
                 })}
@@ -185,19 +190,44 @@ export function DataTable({ block }: { block: TableBlock }) {
       </div>
 
       {truncated && (
-        <div className="border-t border-border px-3 py-2 text-[12px] text-ink-secondary">
+        <div className="border-t border-terminal-border px-3 py-2 text-[12px] text-terminal-ink-dim">
           Showing {rows.length.toLocaleString()} of{" "}
           {sorted.length.toLocaleString()} ·{" "}
           <button
             type="button"
             onClick={() => setShowAll(true)}
-            className="text-link underline underline-offset-2"
+            className="text-pulse underline underline-offset-2"
           >
             Load all
           </button>
         </div>
       )}
     </figure>
+  );
+}
+
+/**
+ * A signed column is a delta/amount, and its values wear the screenshot-style
+ * credit/debit pill -- the sign is kept in the text, so colour never carries
+ * the meaning alone. Unsigned columns stay plain ink.
+ */
+function Cell({ value, meta }: { value: CellValue; meta: ColumnMeta }) {
+  const text = formatCell(value, meta);
+  if (!meta.signed || value === null || value === "") return <>{text}</>;
+
+  const n = toNumber(value);
+  if (n === null || n === 0) {
+    return <span className="text-terminal-ink-dim">{text}</span>;
+  }
+  return (
+    <span
+      className={cn(
+        "inline-block rounded-[4px] px-1.5 py-0.5 text-[12px] font-medium tabular-nums",
+        n < 0 ? "bg-debit/15 text-debit" : "bg-credit/15 text-credit",
+      )}
+    >
+      {text}
+    </span>
   );
 }
 

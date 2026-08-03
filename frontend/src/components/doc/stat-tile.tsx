@@ -43,21 +43,25 @@ export function StatTile({ block }: { block: StatBlock }) {
       </p>
 
       {delta !== null && (
-        <p
-          className={cn(
-            "mt-1.5 flex items-center gap-1 text-[12px]",
-            tone === "good" && "text-status-good-text",
-            tone === "bad" && "text-destructive",
-            tone === "neutral" && "text-ink-secondary",
-          )}
-        >
-          {rising && <ArrowUp className="size-3" aria-hidden />}
-          {falling && <ArrowDown className="size-3" aria-hidden />}
-          {/* Never colour alone -- the direction is also a word. */}
-          <span className="sr-only">{rising ? "up" : falling ? "down" : "flat"} </span>
-          <span className="tabular-nums">
-            {formatCompact(Math.abs(delta))}
-            {deltaPct !== null && ` (${Math.abs(deltaPct).toFixed(1)}%)`}
+        <p className="mt-1.5 flex items-center gap-1.5 text-[12px]">
+          <span
+            className={cn(
+              "inline-flex items-center gap-1 rounded-[4px] px-1.5 py-0.5 font-medium",
+              tone === "good" && "bg-status-good-text/10 text-status-good-text",
+              tone === "bad" && "bg-destructive/10 text-destructive",
+              tone === "neutral" && "bg-muted text-ink-secondary",
+            )}
+          >
+            {rising && <ArrowUp className="size-3" aria-hidden />}
+            {falling && <ArrowDown className="size-3" aria-hidden />}
+            {/* Never colour alone -- the direction is also a word. */}
+            <span className="sr-only">
+              {rising ? "up" : falling ? "down" : "flat"}{" "}
+            </span>
+            <span className="tabular-nums">
+              {formatCompact(Math.abs(delta))}
+              {deltaPct !== null && ` (${Math.abs(deltaPct).toFixed(1)}%)`}
+            </span>
           </span>
           <span className="text-ink-tertiary">vs prior</span>
         </p>
