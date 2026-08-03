@@ -63,6 +63,37 @@ class Settings(BaseSettings):
     # above. 0 = omit the parameter.
     openai_analyze_max_tokens: int = Field(default=0, alias="OPENAI_ANALYZE_MAX_TOKENS")
 
+    # Langfuse (LLM observability). All optional: with no key pair, tracing is
+    # off and the OpenAI call path is byte-identical to before the feature
+    # existed. The SDK reads os.environ, which never sees this .env -- so the
+    # client is built explicitly from these values in datatalk/observability.py.
+    langfuse_public_key: str = Field(default="", alias="LANGFUSE_PUBLIC_KEY")
+    langfuse_secret_key: str = Field(default="", alias="LANGFUSE_SECRET_KEY")
+    # Region/host. Empty = the SDK default (EU cloud). US cloud is
+    # https://us.cloud.langfuse.com; a self-hosted deployment is its own URL.
+    langfuse_base_url: str = Field(default="", alias="LANGFUSE_BASE_URL")
+    # Master switch, so a deployment can keep its keys and still turn tracing
+    # off without editing them out.
+    langfuse_tracing_enabled: bool = Field(
+        default=True, alias="LANGFUSE_TRACING_ENABLED"
+    )
+    # Keeps development runs out of production dashboards and evaluations.
+    langfuse_environment: str = Field(
+        default="default", alias="LANGFUSE_TRACING_ENVIRONMENT"
+    )
+    # 1.0 traces everything. Lower it on a busy deployment; a report run emits
+    # one trace with a few dozen observations, so this is the volume dial.
+    langfuse_sample_rate: float = Field(default=1.0, alias="LANGFUSE_SAMPLE_RATE")
+    langfuse_debug: bool = Field(default=False, alias="LANGFUSE_DEBUG")
+    # Whether warehouse row VALUES may be recorded on run_sql observations.
+    # False keeps the SQL, the columns and the row count (enough to see what the
+    # agent asked and how much came back) but not the tenant's numbers. Note
+    # this cannot cover the prompts themselves: whatever the model was shown is
+    # inherently part of a generation.
+    langfuse_capture_row_values: bool = Field(
+        default=True, alias="LANGFUSE_CAPTURE_ROW_VALUES"
+    )
+
     # ClickHouse
     clickhouse_host: str = Field(default="localhost", alias="CLICKHOUSE_HOST")
     clickhouse_port: int = Field(default=8123, alias="CLICKHOUSE_PORT")
@@ -159,6 +190,15 @@ class Settings(BaseSettings):
     @property
     def has_openai(self) -> bool:
         return bool(self.openai_api_key and self.openai_api_key != "sk-...")
+
+    @property
+    def has_langfuse(self) -> bool:
+        """Both keys present and tracing not switched off."""
+        return bool(
+            self.langfuse_tracing_enabled
+            and self.langfuse_public_key
+            and self.langfuse_secret_key
+        )
 
     @property
     def docs_model(self) -> str:

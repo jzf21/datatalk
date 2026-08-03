@@ -33,6 +33,12 @@ export const FIXTURE_QUERIES: CapturedQuery[] = [
     row_count: 4,
     columns: ["priority", "n"],
   },
+  {
+    dataset_id: "q4",
+    sql: "SELECT account, tickets - lag_tickets AS mom_change, avg_hours - lag_hours AS hours_change\nFROM monthly_by_account WHERE month = toStartOfMonth(now()) ORDER BY mom_change DESC",
+    row_count: 6,
+    columns: ["account", "mom_change", "hours_change"],
+  },
 ];
 
 export const FIXTURE_PLAN: PlanSection[] = [
@@ -85,6 +91,21 @@ export const FIXTURE_REPORT: BlockDocument = {
         ["Wide World Importers", 610, 27.44, 0.9401],
         ["Litware", 455, 19.9, 0.9655],
         ["Proseware", 388, 24.1, null],
+      ],
+    },
+    { type: "heading", text: "Month-over-month movement", level: 2 },
+    {
+      // A signed table: mixed-sign numeric columns wear the credit/debit pills.
+      type: "table",
+      dataset_id: "q4",
+      columns: ["account", "mom_change", "hours_change"],
+      rows: [
+        ["Northwind Traders", 312, -2.4],
+        ["Contoso", 148, 1.8],
+        ["Fabrikam", 0, -0.6],
+        ["Adventure Works", -87, 4.1],
+        ["Tailspin Toys", -12, 0],
+        ["Wide World Importers", -203, -3.25],
       ],
     },
     {

@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
 
+from datatalk import observability as obs
 from datatalk.agent import analyst as analyst_mod
 from datatalk.agent import planner as planner_mod
 from datatalk.agent.blocks import (
@@ -25,6 +26,7 @@ from datatalk.agent.blocks import (
     Paragraph,
     RefError,
     count_data_blocks,
+    document_to_text,
     materialize,
     parse_json_object,
     validate_references,
@@ -152,7 +154,7 @@ def author_dashboard(
         {"role": "user", "content": user},
     ]
 
-    def attempt() -> tuple[Document, list[RefError], str, str]:
+    def attempt(label: str) -> tuple[Document, list[RefError], str, str]:
         kwargs: dict[str, Any] = dict(
             model=ctx.author_model,
             messages=messages,
@@ -161,6 +163,10 @@ def author_dashboard(
         max_tokens = ctx.settings.openai_author_max_tokens
         if max_tokens > 0:
             kwargs["max_tokens"] = max_tokens
+        # The label distinguishes the first attempt from the repair turn in
+        # metadata rather than in the name: a name that varies per execution
+        # detaches every evaluator and dashboard that targets it.
+        kwargs.update(obs.llm_kwargs("author-dashboard", {"attempt": label}))
         resp = ctx.author_openai.chat.completions.create(**kwargs)
         choice = resp.choices[0]
         raw = choice.message.content or ""
@@ -169,37 +175,57 @@ def author_dashboard(
             getattr(choice, "finish_reason", "") or ""
         )
 
-    doc, errors, raw, finish_reason = attempt()
-    if doc.blocks and not errors:
-        return doc, errors, finish_reason
+    with obs.observe(
+        "author-dashboard",
+        as_type=obs.AGENT,
+        input={"request": request, "dataset_ids": list(datasets)},
+    ) as span:
+        doc, errors, raw, finish_reason = attempt("first")
+        if doc.blocks and not errors:
+            span.update(
+                output=doc.to_dict(),
+                metadata={"block_count": len(doc.blocks), "repaired": False},
+            )
+            return doc, errors, finish_reason
 
-    # One repair turn, on whichever failure we actually saw.
-    if not doc.blocks:
-        followup = DASHBOARD_EMPTY_TEMPLATE
-        if finish_reason == "length":
-            # Surfaced as it happens; OPENAI_AUTHOR_MAX_TOKENS is the durable fix.
-            emit("status", {"message": "The dashboard reply was cut off; retrying more compactly…"})
+        # One repair turn, on whichever failure we actually saw.
+        if not doc.blocks:
+            followup = DASHBOARD_EMPTY_TEMPLATE
+            if finish_reason == "length":
+                # Surfaced as it happens; OPENAI_AUTHOR_MAX_TOKENS is the durable fix.
+                emit("status", {"message": "The dashboard reply was cut off; retrying more compactly…"})
+            else:
+                emit("status", {"message": "Rebuilding the dashboard…"})
         else:
-            emit("status", {"message": "Rebuilding the dashboard…"})
-    else:
-        followup = DASHBOARD_REPAIR_TEMPLATE.format(
-            n=len(errors),
-            errors="\n".join(f"- {e}" for e in errors),
-            dataset_map=_dataset_map(datasets),
+            followup = DASHBOARD_REPAIR_TEMPLATE.format(
+                n=len(errors),
+                errors="\n".join(f"- {e}" for e in errors),
+                dataset_map=_dataset_map(datasets),
+            )
+            emit("status", {"message": "Repairing dashboard references…"})
+
+        messages.append({"role": "assistant", "content": raw})
+        messages.append({"role": "user", "content": followup})
+
+        retry_doc, retry_errors, _, retry_finish = attempt("repair")
+
+        # Keep the better attempt: any blocks beats none, then fewer bad references.
+        if not retry_doc.blocks:
+            kept: tuple[Document, list[RefError], str] = (doc, errors, finish_reason)
+        elif not doc.blocks or len(retry_errors) <= len(errors):
+            kept = (retry_doc, retry_errors, retry_finish)
+        else:
+            kept = (doc, errors, finish_reason)
+        span.update(
+            output=kept[0].to_dict(),
+            metadata={
+                "block_count": len(kept[0].blocks),
+                "repaired": True,
+                "reference_errors": len(kept[1]),
+                "finish_reason": kept[2],
+            },
         )
-        emit("status", {"message": "Repairing dashboard references…"})
-
-    messages.append({"role": "assistant", "content": raw})
-    messages.append({"role": "user", "content": followup})
-
-    retry_doc, retry_errors, _, retry_finish = attempt()
-
-    # Keep the better attempt: any blocks beats none, then fewer bad references.
-    if not retry_doc.blocks:
-        return doc, errors, finish_reason
-    if not doc.blocks or len(retry_errors) <= len(errors):
-        return retry_doc, retry_errors, retry_finish
-    return doc, errors, finish_reason
+        return kept
 
 
 def generate_dashboard(
@@ -226,6 +252,45 @@ def generate_dashboard(
         if on_event:
             on_event(kind, data)
 
+    # Opened here, not at the endpoint: generation runs on a worker thread and
+    # OpenTelemetry's active context does not cross one. See generate_report.
+    with obs.agent_run(
+        "generate-dashboard",
+        ctx,
+        feature="dashboard",
+        input={"request": request},
+        metadata={"max_steps": max_steps},
+    ) as root:
+        return _generate_dashboard(
+            request,
+            ctx=ctx,
+            memory_suggestions=memory_suggestions,
+            memory_suggestions_fn=memory_suggestions_fn,
+            on_event=on_event,
+            max_steps=max_steps,
+            emit=emit,
+            root=root,
+        )
+
+
+def _generate_dashboard(
+    request: str,
+    *,
+    ctx: "TenantContext",
+    memory_suggestions: list[str] | None,
+    memory_suggestions_fn: Callable[[], list[str]] | None,
+    on_event: EventFn | None,
+    max_steps: int,
+    emit: Callable[[str, dict[str, Any]], None],
+    root: Any,
+) -> DashboardResult:
+    """The body of :func:`generate_dashboard`, inside its trace.
+
+    Split out only so the pipeline below is not indented under two context
+    managers; ``root`` is the trace's root observation, whose output is the
+    dashboard a reviewer wants to read first.
+    """
+
     def empty_result(
         reason: str,
         queries: list[dict[str, Any]] | None = None,
@@ -240,6 +305,15 @@ def generate_dashboard(
         emit("error", {"message": reason})
         document = _empty_document(reason)
         emit("dashboard", {"document": document.to_dict()})
+        # An empty dashboard is a real outcome, not a crash — but it is the one
+        # a user complains about, so it must be findable: WARNING level plus the
+        # reason as the trace output.
+        root.update(
+            output={"dashboard": reason},
+            level="WARNING",
+            status_message=reason[:500],
+            metadata={"empty": True, "steps": steps},
+        )
         return DashboardResult(
             request=request,
             document=document,
@@ -249,7 +323,11 @@ def generate_dashboard(
 
     emit("status", {"message": "Loading schema…"})
     resolve_memory = start_memory_fetch(memory_suggestions, memory_suggestions_fn)
-    schema_context = build_catalog(ctx)
+    with obs.observe(
+        "load-catalog", as_type=obs.RETRIEVER, input={"sources": list(ctx.source_names)}
+    ) as span:
+        schema_context = build_catalog(ctx)
+        span.update(output={"chars": len(schema_context)})
     fetched = resolve_memory()
     if memory_suggestions is None and fetched:
         emit("memory", {"count": len(fetched), "suggestions": fetched})
@@ -354,6 +432,18 @@ def generate_dashboard(
         )
 
     emit("dashboard", {"document": document.to_dict()})
+
+    root.update(
+        output={"dashboard": document_to_text(document)},
+        metadata={
+            "blocks": len(document.blocks),
+            "data_blocks": count_data_blocks(document),
+            "datasets": len(loop.datasets),
+            "steps": loop.steps,
+            "reference_errors": len(errors),
+            "insights": len(insight.raw.get("insights", []) or []),
+        },
+    )
 
     return DashboardResult(
         request=request,

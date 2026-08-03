@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from datatalk import observability as obs
 from datatalk.agent.blocks import Document, parse_json_object
 from datatalk.agent.context_block import build_context_block
 from datatalk.agent.planner import Section, plan_to_text
@@ -49,13 +50,26 @@ def write_report(
         f"Captured datasets (reference these by dataset_id):\n"
         f"{dataset_previews(datasets, sources=sources)}"
     )
-    resp = ctx.openai.chat.completions.create(
-        model=ctx.model,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        temperature=0,
-    )
-    obj = parse_json_object(resp.choices[0].message.content or "")
-    return Document.from_dict(obj)
+    with obs.observe(
+        "write-report",
+        as_type=obs.AGENT,
+        input={"request": request, "dataset_ids": list(datasets)},
+    ) as span:
+        resp = ctx.openai.chat.completions.create(
+            model=ctx.model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            temperature=0,
+            **obs.llm_kwargs("write-report"),
+        )
+        obj = parse_json_object(resp.choices[0].message.content or "")
+        doc = Document.from_dict(obj)
+        # The *authoring* document, before materialize() substitutes real
+        # values — which is exactly the artifact to inspect when a block comes
+        # back as an italic "unknown dataset" note.
+        span.update(
+            output=doc.to_dict(), metadata={"block_count": len(doc.blocks)}
+        )
+        return doc

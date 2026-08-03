@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from datatalk import clients
+from datatalk import observability as obs
 from datatalk.agent.analyze import analyze_dashboard, analyze_report
 from datatalk.agent.dashboard import generate_dashboard
 from datatalk.agent.qa import answer_question
@@ -51,6 +52,13 @@ async def lifespan(app: FastAPI):
     from datatalk.scripts.db import alembic_config, schema_is_current
 
     settings = get_settings()
+
+    # Before any request can reach the agents. Configuring it installs the
+    # Langfuse patch on the OpenAI SDK; with no LANGFUSE_* credentials this is a
+    # no-op and the OpenAI call path is untouched. Never fatal: an observability
+    # backend must not be able to stop reports from being generated.
+    obs.configure(settings)
+
     engine = get_engine()
     with engine.connect():
         pass  # surfaces an unreachable database immediately
@@ -82,6 +90,9 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    # Before the process goes away: the SDK batches in the background, so a
+    # report finished seconds before shutdown would otherwise never be sent.
+    obs.shutdown()
     clients.close_all()
     engine.dispose()
 
@@ -474,6 +485,7 @@ def ask(report_id: int, req: AskRequest, rctx: RequestContext = Depends(require_
                     # "Querying (step 1)…" status the user relies on.
                     schema_context=build_catalog(ctx),
                     on_event=on_event,
+                    report_id=report_id,
                 )
             except Exception as exc:  # noqa: BLE001
                 holder["error"] = str(exc)

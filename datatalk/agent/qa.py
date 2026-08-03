@@ -11,6 +11,7 @@ import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from datatalk import observability as obs
 from datatalk.agent.blocks import Document, materialize, parse_json_object
 from datatalk.agent.sqlloop import EventFn, run_capture_loop
 from datatalk.llm.prompts import BLOCK_SCHEMA_DOC, QA_SYSTEM, ANTI_FABRICATION
@@ -37,11 +38,16 @@ def answer_question(
     schema_context: str,
     on_event: EventFn | None = None,
     max_steps: int = 6,
+    report_id: int | None = None,
 ) -> QAResult:
     """Answer ``question`` about ``report_document`` with a materialized Document.
 
     ``conversation`` is a list of prior ``{"question", "answer"}`` turns for
     context. ``prior_queries`` is the report's query history (sql/columns only).
+
+    ``report_id`` only names the Langfuse **session**: one turn is one trace (a
+    conversation has no knowable end, and per-turn traces stay navigable), and
+    the session is what threads them back together in the session view.
     """
     system = QA_SYSTEM.format(
         block_schema=BLOCK_SCHEMA_DOC,
@@ -72,18 +78,35 @@ def answer_question(
         {"role": "user", "content": "\n".join(context_parts)},
     ]
 
-    loop = run_capture_loop(
-        messages,
-        ctx=ctx,
-        max_steps=max_steps,
-        on_event=on_event,
-    )
+    with obs.agent_run(
+        "answer-question",
+        ctx,
+        feature="qa",
+        input={"question": question},
+        session_id=f"report-{report_id}" if report_id is not None else None,
+        metadata={
+            "report_id": report_id,
+            "turn": len(conversation or []) + 1,
+            "max_steps": max_steps,
+        },
+    ) as root:
+        loop = run_capture_loop(
+            messages,
+            ctx=ctx,
+            max_steps=max_steps,
+            on_event=on_event,
+            loop_name="qa",
+        )
 
-    authoring = Document.from_dict(parse_json_object(loop.final_content))
-    answer = materialize(authoring, loop.datasets)
-    return QAResult(
-        question=question,
-        answer_document=answer,
-        queries=loop.queries,
-        steps=loop.steps,
-    )
+        authoring = Document.from_dict(parse_json_object(loop.final_content))
+        answer = materialize(authoring, loop.datasets)
+        root.update(
+            output={"answer": document_to_text(answer)},
+            metadata={"steps": loop.steps, "dataset_count": len(loop.datasets)},
+        )
+        return QAResult(
+            question=question,
+            answer_document=answer,
+            queries=loop.queries,
+            steps=loop.steps,
+        )

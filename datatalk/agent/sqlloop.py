@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
 
 from datatalk import jsonsafe
+from datatalk import observability as obs
 from datatalk.agent.executor import QueryResult, UnsafeSQLError, run_sql
 from datatalk.context import UnknownSourceError
 from datatalk.warehouse import catalog
@@ -199,6 +200,36 @@ class LoopResult:
 _json_safe = jsonsafe.json_safe
 
 
+def _result_payload(
+    dataset_id: str,
+    source: str,
+    result: QueryResult,
+    rows_to_show: int = _ROWS_TO_MODEL,
+    note: str | None = None,
+) -> dict[str, Any]:
+    """The captured query result as the model will see it.
+
+    Kept as a dict rather than going straight to JSON so the trace can record
+    the same structure the model got: a pre-serialized string reaches Langfuse
+    as an opaque blob, where neither the mask nor the UI's renderer can see
+    into it.
+    """
+    shown = result.rows[:rows_to_show]
+    payload: dict[str, Any] = {
+        "dataset_id": dataset_id,
+        "source": source,
+        "columns": result.columns,
+        "rows": [[_json_safe(v) for v in row] for row in shown],
+        "row_count": result.row_count,
+        "rows_shown": len(shown),
+        "truncated": result.truncated or result.row_count > len(shown),
+        "sql_executed": result.sql,
+    }
+    if note:
+        payload["note"] = note
+    return payload
+
+
 def _serialize_result(
     dataset_id: str,
     source: str,
@@ -212,20 +243,22 @@ def _serialize_result(
     an authoring block later, and ``source`` so it can tell two similarly
     shaped datasets from different warehouses apart.
     """
-    shown = result.rows[:rows_to_show]
-    payload = {
-        "dataset_id": dataset_id,
-        "source": source,
-        "columns": result.columns,
-        "rows": [[_json_safe(v) for v in row] for row in shown],
-        "row_count": result.row_count,
-        "rows_shown": len(shown),
-        "truncated": result.truncated or result.row_count > len(shown),
-        "sql_executed": result.sql,
-    }
-    if note:
-        payload["note"] = note
-    return json.dumps(payload, default=str)
+    return json.dumps(
+        _result_payload(dataset_id, source, result, rows_to_show, note), default=str
+    )
+
+
+def _traced(content: str) -> Any:
+    """A tool payload as structure, for an observation's ``output``.
+
+    The tool protocol is strings; a trace wants objects. Falls back to the raw
+    string rather than dropping anything -- an unparsable payload is exactly
+    the one worth seeing.
+    """
+    try:
+        return json.loads(content)
+    except (ValueError, TypeError):
+        return content
 
 
 def _describe(
@@ -373,6 +406,7 @@ def run_capture_loop(
     openai: Any | None = None,
     deadline_s: float | None = None,
     error_budget: int = 3,
+    loop_name: str = "sqlloop",
 ) -> LoopResult:
     """Drive the tool-calling loop, capturing each successful query as a dataset.
 
@@ -400,6 +434,11 @@ def run_capture_loop(
     documentation agent. They travel as a pair on purpose: with
     ``OPENAI_DOCS_BASE_URL`` pointing at a second provider, overriding the model
     name alone would send it to the wrong endpoint.
+
+    ``loop_name`` names this loop's observations in Langfuse (``analyst-step``,
+    ``qa-step``, …). It must be a constant per *caller*, never per run: an
+    observation name is what evaluators and dashboards target, so a name that
+    varies per execution silently detaches every one of them.
     """
     client = openai if openai is not None else ctx.openai
     model = model or ctx.model
@@ -466,6 +505,7 @@ def run_capture_loop(
             messages=messages,
             tools=tools,
             temperature=0,
+            **obs.llm_kwargs(f"{loop_name}-step", {"step": step, "max_steps": max_steps}),
         )
         msg = resp.choices[0].message
 
@@ -515,6 +555,12 @@ def run_capture_loop(
             for i, (tc, _) in enumerate(parsed)
             if tc.function.name not in ("describe_source", "read_context")
         ]
+        # Tool observations are opened HERE, on the loop thread, where the
+        # enclosing agent span is still the active OTel context — the pool
+        # threads below would parent them at the trace root instead. The whole
+        # batch is submitted at once, so opening them together is also the
+        # honest start time. Each is ended once its outcome is known.
+        sql_spans: dict[int, Any] = {}
         for i in sql_positions:
             tc, args = parsed[i]
             emit(
@@ -523,6 +569,14 @@ def run_capture_loop(
                     "query_id": tc.id,
                     "sql": args.get("sql", ""),
                     "source": args.get("source") or None,
+                },
+            )
+            sql_spans[i] = obs.start(
+                "run-sql",
+                as_type=obs.TOOL,
+                input={
+                    "source": args.get("source") or None,
+                    "sql": args.get("sql", ""),
                 },
             )
 
@@ -561,28 +615,47 @@ def run_capture_loop(
         for i, (tc, args) in enumerate(parsed):
             captured: tuple[str, str, QueryResult] | None = None
             if tc.function.name == "describe_source":
-                tool_content = _describe(
-                    ctx,
-                    args.get("source") or None,
-                    args.get("table", ""),
-                    emit,
-                    seen_context,
-                )
+                with obs.observe(
+                    "describe-source",
+                    as_type=obs.TOOL,
+                    input={
+                        "source": args.get("source") or None,
+                        "table": args.get("table", ""),
+                    },
+                ) as span:
+                    tool_content = _describe(
+                        ctx,
+                        args.get("source") or None,
+                        args.get("table", ""),
+                        emit,
+                        seen_context,
+                    )
+                    span.update(output=_traced(tool_content))
             elif tc.function.name == "read_context":
                 raw_paths = args.get("paths")
-                if isinstance(raw_paths, list):
-                    tool_content = _read_context_batch(
-                        ctx, raw_paths, emit, seen_context
-                    )
-                else:
-                    # Single-path forms: a bare string under "paths", or the
-                    # older "path" argument some models keep emitting.
-                    single = raw_paths if isinstance(raw_paths, str) else ""
-                    tool_content = _read_context(
-                        ctx, single or args.get("path", ""), emit, seen_context
-                    )
+                # `retriever`, not `tool`: this is a lookup into the workspace's
+                # curated documentation, and typing it as such is what lets a
+                # "did the agent read the right context?" filter exist at all.
+                with obs.observe(
+                    "read-context",
+                    as_type=obs.RETRIEVER,
+                    input={"paths": raw_paths if raw_paths is not None else args.get("path", "")},
+                ) as span:
+                    if isinstance(raw_paths, list):
+                        tool_content = _read_context_batch(
+                            ctx, raw_paths, emit, seen_context
+                        )
+                    else:
+                        # Single-path forms: a bare string under "paths", or the
+                        # older "path" argument some models keep emitting.
+                        single = raw_paths if isinstance(raw_paths, str) else ""
+                        tool_content = _read_context(
+                            ctx, single or args.get("path", ""), emit, seen_context
+                        )
+                    span.update(output=_traced(tool_content))
             else:
                 result, resolved, tool_err, event_err = outcomes[i]
+                span = sql_spans.get(i, obs.NULL_SPAN)
                 if result is not None:
                     dataset_id = f"q{idx}"
                     idx += 1
@@ -598,6 +671,21 @@ def run_capture_loop(
                     )
                     tool_content = _serialize_result(dataset_id, resolved, result)
                     captured = (dataset_id, resolved, result)
+                    # Record what the MODEL was handed, not the whole result
+                    # set: that is the context it actually reasoned from, and
+                    # the row cap keeps a 5000-row capture out of the trace.
+                    traced = _result_payload(dataset_id, resolved, result)
+                    if not obs.capture_row_values():
+                        traced["rows"] = "<not captured>"
+                    span.update(
+                        output=traced,
+                        metadata={
+                            "dataset_id": dataset_id,
+                            "source": resolved,
+                            "row_count": result.row_count,
+                            "truncated": result.truncated,
+                        },
+                    ).end()
                     emit(
                         "result",
                         {
@@ -610,6 +698,14 @@ def run_capture_loop(
                     )
                 else:
                     tool_content = json.dumps({"error": tool_err})
+                    # A rejected or failing query is a first-class outcome here
+                    # (the model reads the error and retries), but it should
+                    # still surface as ERROR so a run full of them is findable.
+                    span.update(
+                        output={"error": tool_err},
+                        level="ERROR",
+                        status_message=tool_err[:500],
+                    ).end()
                     emit("error", {"query_id": tc.id, "message": event_err})
 
             messages.append(
@@ -654,7 +750,12 @@ def run_capture_loop(
             "content": "Stop querying and produce your final answer now with the data you have.",
         }
     )
-    resp = client.chat.completions.create(model=model, messages=messages, temperature=0)
+    resp = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=0,
+        **obs.llm_kwargs(f"{loop_name}-finalize", {"steps_used": step}),
+    )
     return LoopResult(
         datasets=datasets,
         queries=queries,

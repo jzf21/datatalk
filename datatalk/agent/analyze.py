@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from datatalk import observability as obs
 from datatalk.agent.blocks import Document, document_to_text
 from datatalk.agent.context_block import build_context_block
 from datatalk.agent.report import build_memory_block
@@ -67,14 +68,24 @@ def analyze_report(
     body = clip_text(report_text, _MAX_INPUT_CHARS)
     user_content = f"{origin}{focus_line}\n\n=== REPORT ===\n{body}"
 
-    resp = ctx.openai.chat.completions.create(
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user_content},
-        ],
-        **_completion_kwargs(ctx),
-    )
-    return resp.choices[0].message.content or ""
+    with obs.agent_run(
+        "analyze-report",
+        ctx,
+        feature="analyze",
+        input={"report": body, "focus": focus},
+        metadata={"origin": source, "input_chars": len(report_text)},
+    ) as root:
+        resp = ctx.openai.chat.completions.create(
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_content},
+            ],
+            **_completion_kwargs(ctx),
+            **obs.llm_kwargs("analyze-report"),
+        )
+        analysis = resp.choices[0].message.content or ""
+        root.update(output={"analysis": analysis})
+        return analysis
 
 
 def analyze_dashboard(
@@ -99,11 +110,20 @@ def analyze_dashboard(
     )
     focus_line = f"\n\nFocus especially on: {focus}" if focus else ""
     user_content = f"{focus_line}\n\n=== DASHBOARD ===\n{text}"
-    resp = ctx.openai.chat.completions.create(
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user_content},
-        ],
-        **_completion_kwargs(ctx),
-    )
-    return resp.choices[0].message.content or ""
+    with obs.agent_run(
+        "analyze-dashboard",
+        ctx,
+        feature="analyze",
+        input={"dashboard": text, "focus": focus},
+    ) as root:
+        resp = ctx.openai.chat.completions.create(
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_content},
+            ],
+            **_completion_kwargs(ctx),
+            **obs.llm_kwargs("analyze-dashboard"),
+        )
+        analysis = resp.choices[0].message.content or ""
+        root.update(output={"analysis": analysis})
+        return analysis

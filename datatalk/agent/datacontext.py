@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from datatalk import observability as obs
 from datatalk.agent.blocks import parse_json_object
 from datatalk.agent.sqlloop import EventFn, dataset_previews, run_capture_loop
 from datatalk.llm.prompts import (
@@ -135,7 +136,21 @@ def _select_tables(
 # --- Pass B/D/E: one non-tool call --------------------------------------------
 
 
-def _complete(ctx: "TenantContext", system: str, user: str) -> dict[str, Any]:
+def _complete(
+    ctx: "TenantContext",
+    system: str,
+    user: str,
+    *,
+    name: str = "docs-completion",
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """One non-tool call on the docs model.
+
+    ``name`` names the generation in Langfuse and must be constant per *pass*
+    (``write-ontology-file``, not ``write-ontology-orders``): the per-file
+    identity belongs in ``metadata``, where it does not break every filter that
+    targets the name.
+    """
     resp = ctx.docs_openai.chat.completions.create(
         model=ctx.docs_model,
         messages=[
@@ -143,6 +158,7 @@ def _complete(ctx: "TenantContext", system: str, user: str) -> dict[str, Any]:
             {"role": "user", "content": user},
         ],
         temperature=0,
+        **obs.llm_kwargs(name, metadata),
     )
     return parse_json_object(resp.choices[0].message.content or "")
 
@@ -195,7 +211,60 @@ def generate_data_context(
     In ``revise`` mode each existing file's current body is shown to the writer
     and it is told to revise rather than rewrite -- so a human's edits arrive as
     prompt input, not as something to be merged back afterwards.
+
+    One Langfuse trace covers the whole run, opened here rather than at the
+    endpoint: this runs on a worker thread, which OpenTelemetry's active context
+    does not follow.
     """
+    with obs.agent_run(
+        "generate-data-context",
+        ctx,
+        feature="data-context",
+        input={"mode": mode, "sources": list(ctx.source_names)},
+        metadata={
+            "max_entities": max_entities,
+            "max_playbooks": max_playbooks,
+            "profile_steps": profile_steps,
+            "existing_files": len(existing or []),
+        },
+    ) as root:
+        result = _generate_data_context(
+            ctx=ctx,
+            existing=existing,
+            mode=mode,
+            on_event=on_event,
+            max_tables_per_source=max_tables_per_source,
+            max_tables_total=max_tables_total,
+            max_entities=max_entities,
+            max_playbooks=max_playbooks,
+            profile_steps=profile_steps,
+            max_seconds=max_seconds,
+        )
+        root.update(
+            output={
+                "files": [
+                    {"path": f.path, "summary": f.summary} for f in result.files
+                ]
+            },
+            metadata={"model": result.model, **result.stats},
+        )
+        return result
+
+
+def _generate_data_context(
+    *,
+    ctx: "TenantContext",
+    existing: list[SavedContextFile] | None,
+    mode: str,
+    on_event: EventFn | None,
+    max_tables_per_source: int,
+    max_tables_total: int,
+    max_entities: int,
+    max_playbooks: int,
+    profile_steps: int,
+    max_seconds: float,
+) -> DataContextResult:
+    """The five passes, inside the trace :func:`generate_data_context` opened."""
     def emit(kind: str, data: dict[str, Any]) -> None:
         if on_event:
             on_event(kind, data)
@@ -255,6 +324,7 @@ def generate_data_context(
                 schema_context=plan_catalog,
             ),
             "Map this workspace's entities and the analyses its data exists to serve.",
+            name="plan-data-context",
         )
     except Exception as exc:  # noqa: BLE001
         emit("error", {"message": f"Planning failed: {exc}"})
@@ -307,18 +377,29 @@ def generate_data_context(
             entity_plan=entity_plan,
         )
         try:
-            loop = run_capture_loop(
-                [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": f"Profile source {name!r}."},
-                ],
-                ctx=ctx,
-                max_steps=profile_steps,
-                on_event=on_event,
-                start_index=idx,
-                model=ctx.docs_model,
-                openai=ctx.docs_openai,
-            )
+            with obs.observe(
+                "profile-source",
+                as_type=obs.AGENT,
+                input={"source": name, "tables": [t.qualified_name for t in tables]},
+                metadata={"source": name},
+            ) as span:
+                loop = run_capture_loop(
+                    [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": f"Profile source {name!r}."},
+                    ],
+                    ctx=ctx,
+                    max_steps=profile_steps,
+                    on_event=on_event,
+                    start_index=idx,
+                    model=ctx.docs_model,
+                    openai=ctx.docs_openai,
+                    loop_name="profiler",
+                )
+                span.update(
+                    output={"findings": loop.final_content},
+                    metadata={"queries": len(loop.queries), "steps": loop.steps},
+                )
         except Exception as exc:  # noqa: BLE001
             emit("error", {"message": f"{name}: {exc}"})
             stats["failed_sources"].append(name)
@@ -359,6 +440,8 @@ def generate_data_context(
                     f"Schema detail:\n{detail}\n\n"
                     f"Profiling results:\n{previews}"
                 ),
+                name="write-ontology-file",
+                metadata={"path": path, "revised": path in prior},
             )
         except Exception as exc:  # noqa: BLE001 - one bad file must not lose the rest
             emit("error", {"message": f"{path}: {exc}"})
@@ -396,6 +479,8 @@ def generate_data_context(
                     f"Entity files written:\n{ontology_summaries}\n\n"
                     f"Profiling results:\n{previews}"
                 ),
+                name="write-playbook-file",
+                metadata={"path": path, "revised": path in prior},
             )
         except Exception as exc:  # noqa: BLE001
             emit("error", {"message": f"{path}: {exc}"})
@@ -417,6 +502,8 @@ def generate_data_context(
                 f"Context files written:\n{ontology_summaries}\n\n"
                 f"Profiling results:\n{previews}"
             ),
+            name="write-overview-file",
+            metadata={"revised": "overview.md" in prior},
         )
     except Exception as exc:  # noqa: BLE001
         emit("error", {"message": f"overview.md: {exc}"})

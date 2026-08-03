@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from datatalk import observability as obs
 from datatalk.agent.planner import Section, plan_to_text
 from datatalk.agent.sqlloop import EventFn, LoopResult, run_capture_loop
 from datatalk.llm.prompts import ANALYST_SYSTEM, ANTI_FABRICATION
@@ -51,10 +52,36 @@ def gather_data(
         {"role": "system", "content": system},
         {"role": "user", "content": user},
     ]
-    return run_capture_loop(
-        messages,
-        ctx=ctx,
-        max_steps=max_steps,
-        on_event=on_event,
-        deadline_s=deadline_s,
-    )
+    # The Analyst's own `agent` node. Its generations and tool calls nest under
+    # this, each tool a sibling of the generation that requested it — which is
+    # what makes "which step was slow / which query failed" readable in the tree.
+    with obs.observe(
+        "gather-data",
+        as_type=obs.AGENT,
+        input={"request": request, "plan": plan_to_text(sections)},
+        metadata={"max_steps": max_steps, "deadline_s": deadline_s},
+    ) as span:
+        result = run_capture_loop(
+            messages,
+            ctx=ctx,
+            max_steps=max_steps,
+            on_event=on_event,
+            deadline_s=deadline_s,
+            loop_name="analyst",
+        )
+        span.update(
+            output={
+                "notes": result.final_content,
+                "datasets": [
+                    {
+                        "dataset_id": q["dataset_id"],
+                        "source": q.get("source", ""),
+                        "row_count": q.get("row_count"),
+                        "columns": q.get("columns"),
+                    }
+                    for q in result.queries
+                ],
+            },
+            metadata={"steps": result.steps, "dataset_count": len(result.datasets)},
+        )
+        return result

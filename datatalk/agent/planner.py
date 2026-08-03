@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from datatalk import observability as obs
 from datatalk.agent.blocks import parse_json_object
 from datatalk.llm.prompts import PLANNER_SYSTEM
 
@@ -55,28 +56,39 @@ def plan_report(
         memory_block=memory_block,
         context_block=context_block,
     )
-    resp = ctx.openai.chat.completions.create(
-        model=ctx.model,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": request},
-        ],
-        temperature=0,
-    )
-    obj = parse_json_object(resp.choices[0].message.content or "")
-    sections: list[Section] = []
-    for i, raw in enumerate(obj.get("sections", []), start=1):
-        if not isinstance(raw, dict):
-            continue
-        sections.append(
-            Section(
-                id=str(raw.get("id") or f"section_{i}"),
-                title=str(raw.get("title") or f"Section {i}"),
-                goal=str(raw.get("goal") or ""),
-                data_questions=[str(q) for q in raw.get("data_questions", [])],
-            )
+    # An `agent` observation, not a plain span: the Planner is one of three
+    # agents in the pipeline, and typing it as such is what makes it a node in
+    # the Langfuse agent graph rather than an anonymous step.
+    with obs.observe(
+        "plan-report", as_type=obs.AGENT, input={"request": request}
+    ) as span:
+        resp = ctx.openai.chat.completions.create(
+            model=ctx.model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": request},
+            ],
+            temperature=0,
+            **obs.llm_kwargs("plan-report"),
         )
-    return sections
+        obj = parse_json_object(resp.choices[0].message.content or "")
+        sections: list[Section] = []
+        for i, raw in enumerate(obj.get("sections", []), start=1):
+            if not isinstance(raw, dict):
+                continue
+            sections.append(
+                Section(
+                    id=str(raw.get("id") or f"section_{i}"),
+                    title=str(raw.get("title") or f"Section {i}"),
+                    goal=str(raw.get("goal") or ""),
+                    data_questions=[str(q) for q in raw.get("data_questions", [])],
+                )
+            )
+        span.update(
+            output={"sections": [s.to_dict() for s in sections]},
+            metadata={"section_count": len(sections)},
+        )
+        return sections
 
 
 def plan_to_text(sections: list[Section]) -> str:

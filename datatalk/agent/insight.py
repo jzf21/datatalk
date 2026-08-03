@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from datatalk import observability as obs
 from datatalk.agent.blocks import parse_json_object
 from datatalk.agent.context_block import build_context_block
 from datatalk.agent.planner import Section, plan_to_text
@@ -115,35 +116,54 @@ def synthesize_insights(
         f"Analyst notes:\n{loop.final_content or '(none)'}"
     )
 
-    try:
-        kwargs: dict[str, Any] = dict(
-            model=ctx.author_model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            temperature=0,
-        )
-        max_tokens = ctx.settings.openai_author_max_tokens
-        if max_tokens > 0:
-            kwargs["max_tokens"] = max_tokens
-        resp = ctx.author_openai.chat.completions.create(**kwargs)
-        reply = resp.choices[0].message.content or ""
-    except Exception as exc:  # noqa: BLE001 - the dashboard must ship without insights
-        emit("error", {"message": f"Insight pass failed: {exc}"})
+    with obs.observe(
+        "synthesize-insights",
+        as_type=obs.AGENT,
+        input={"request": request, "dataset_ids": list(loop.datasets)},
+    ) as span:
+        try:
+            kwargs: dict[str, Any] = dict(
+                model=ctx.author_model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                temperature=0,
+            )
+            max_tokens = ctx.settings.openai_author_max_tokens
+            if max_tokens > 0:
+                kwargs["max_tokens"] = max_tokens
+            kwargs.update(obs.llm_kwargs("synthesize-insights"))
+            resp = ctx.author_openai.chat.completions.create(**kwargs)
+            reply = resp.choices[0].message.content or ""
+        except Exception as exc:  # noqa: BLE001 - the dashboard must ship without insights
+            emit("error", {"message": f"Insight pass failed: {exc}"})
+            # Swallowed on purpose, so it must be visible somewhere: without
+            # this the dashboard just quietly gets worse and the trace looks
+            # clean.
+            span.update(
+                output={"error": str(exc)},
+                level="WARNING",
+                status_message=f"insight pass failed: {exc}"[:500],
+            )
+            return InsightResult()
+
+        raw = parse_json_object(reply)
+        if raw:
+            emit("insights", raw)
+            span.update(
+                output=raw, metadata={"insight_count": len(raw.get("insights", []) or [])}
+            )
+            return InsightResult(text_block=_render_text_block(raw), raw=raw)
+
+        if reply.strip():
+            # Unparsable but non-empty: a prose insight still beats none.
+            fenced = (
+                "=== DATA INSIGHTS (from a review of the full captured data) ===\n"
+                f"{clip_text(reply.strip(), _MAX_FALLBACK_CHARS)}\n"
+                "=== END DATA INSIGHTS ==="
+            )
+            span.update(output=reply, metadata={"parsed": False})
+            return InsightResult(text_block=fenced, raw={})
+        span.update(output=None, metadata={"parsed": False, "empty": True})
         return InsightResult()
-
-    raw = parse_json_object(reply)
-    if raw:
-        emit("insights", raw)
-        return InsightResult(text_block=_render_text_block(raw), raw=raw)
-
-    if reply.strip():
-        # Unparsable but non-empty: a prose insight still beats none.
-        fenced = (
-            "=== DATA INSIGHTS (from a review of the full captured data) ===\n"
-            f"{clip_text(reply.strip(), _MAX_FALLBACK_CHARS)}\n"
-            "=== END DATA INSIGHTS ==="
-        )
-        return InsightResult(text_block=fenced, raw={})
-    return InsightResult()

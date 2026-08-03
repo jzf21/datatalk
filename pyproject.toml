@@ -20,6 +20,10 @@ dependencies = [
     "psycopg[binary,pool]>=3.1",
     "argon2-cffi>=23.1",
     "cryptography>=42",
+    # LLM observability. Inert without LANGFUSE_* credentials -- see
+    # datatalk/observability.py -- but a hard dependency rather than an extra so
+    # that `import datatalk.observability` cannot differ between environments.
+    "langfuse>=4.14,<5",
 ]
 
 [project.optional-dependencies]

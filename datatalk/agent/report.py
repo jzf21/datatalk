@@ -16,10 +16,11 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
 
+from datatalk import observability as obs
 from datatalk.agent import analyst as analyst_mod
 from datatalk.agent import planner as planner_mod
 from datatalk.agent import reporter as reporter_mod
-from datatalk.agent.blocks import Document, materialize
+from datatalk.agent.blocks import Document, document_to_text, materialize
 from datatalk.agent.sqlloop import EventFn
 from datatalk.warehouse.catalog import build_catalog
 from datatalk.llm.prompts import MEMORY_BLOCK_TEMPLATE
@@ -91,61 +92,89 @@ def generate_report(
 
     Every LLM and ClickHouse call resolves through ``ctx``, so a run can only
     reach the data of the org it was started for.
+
+    The whole run is one Langfuse trace, opened here rather than at the
+    endpoint: this function is what the streaming endpoints hand to a worker
+    thread, and OpenTelemetry's active context does not cross a thread boundary.
     """
 
     def emit(kind: str, data: dict[str, Any]) -> None:
         if on_event:
             on_event(kind, data)
 
-    emit("status", {"message": "Loading schema…"})
-    resolve_memory = start_memory_fetch(memory_suggestions, memory_suggestions_fn)
-    schema_context = build_catalog(ctx)
-    fetched = resolve_memory()
-    if memory_suggestions is None and fetched:
-        emit("memory", {"count": len(fetched), "suggestions": fetched})
-    memory_block = build_memory_block(fetched)
+    with obs.agent_run(
+        "generate-report",
+        ctx,
+        feature="report",
+        input={"request": request},
+        metadata={"max_steps": max_steps, "use_memory": memory_suggestions_fn is not None},
+    ) as root:
+        emit("status", {"message": "Loading schema…"})
+        resolve_memory = start_memory_fetch(memory_suggestions, memory_suggestions_fn)
+        with obs.observe(
+            "load-catalog", as_type=obs.RETRIEVER, input={"sources": list(ctx.source_names)}
+        ) as span:
+            schema_context = build_catalog(ctx)
+            span.update(output={"chars": len(schema_context)})
+        fetched = resolve_memory()
+        if memory_suggestions is None and fetched:
+            emit("memory", {"count": len(fetched), "suggestions": fetched})
+        memory_block = build_memory_block(fetched)
 
-    # 1. Planner
-    emit("status", {"message": "Planning the report…"})
-    sections = planner_mod.plan_report(
-        request,
-        ctx=ctx,
-        schema_context=schema_context,
-        memory_block=memory_block,
-    )
-    emit("plan", {"sections": [s.to_dict() for s in sections]})
+        # 1. Planner
+        emit("status", {"message": "Planning the report…"})
+        sections = planner_mod.plan_report(
+            request,
+            ctx=ctx,
+            schema_context=schema_context,
+            memory_block=memory_block,
+        )
+        emit("plan", {"sections": [s.to_dict() for s in sections]})
 
-    # 2. Analyst — the only agent that touches the warehouses.
-    emit("status", {"message": "Gathering data…"})
-    loop = analyst_mod.gather_data(
-        request,
-        sections,
-        ctx=ctx,
-        schema_context=schema_context,
-        memory_block=memory_block,
-        on_event=on_event,
-        max_steps=max_steps,
-    )
+        # 2. Analyst — the only agent that touches the warehouses.
+        emit("status", {"message": "Gathering data…"})
+        loop = analyst_mod.gather_data(
+            request,
+            sections,
+            ctx=ctx,
+            schema_context=schema_context,
+            memory_block=memory_block,
+            on_event=on_event,
+            max_steps=max_steps,
+        )
 
-    # 3. Reporter — authors a dataset-referencing Document (no numbers typed).
-    emit("status", {"message": "Writing the report…"})
-    authoring = reporter_mod.write_report(
-        request,
-        sections,
-        loop.datasets,
-        ctx=ctx,
-        sources=loop.dataset_sources,
-        memory_block=memory_block,
-        queries=loop.queries,
-    )
+        # 3. Reporter — authors a dataset-referencing Document (no numbers typed).
+        emit("status", {"message": "Writing the report…"})
+        authoring = reporter_mod.write_report(
+            request,
+            sections,
+            loop.datasets,
+            ctx=ctx,
+            sources=loop.dataset_sources,
+            memory_block=memory_block,
+            queries=loop.queries,
+        )
 
-    # Materialize dataset references into concrete values.
-    document = materialize(authoring, loop.datasets)
-    emit("report", {"document": document.to_dict()})
+        # Materialize dataset references into concrete values.
+        document = materialize(authoring, loop.datasets)
+        emit("report", {"document": document.to_dict()})
 
-    return ReportResult(
-        request=request,
-        document=document,
-        queries=loop.queries,
-        steps=loop.steps,
-    )
+        # The trace output is what a reviewer reads first, so it is the report
+        # itself — flattened to text, the same shape a human sees — not the
+        # dataset plumbing, which is already on the observations below.
+        root.update(
+            output={"report": document_to_text(document)},
+            metadata={
+                "blocks": len(document.blocks),
+                "datasets": len(loop.datasets),
+                "steps": loop.steps,
+                "sections": len(sections),
+            },
+        )
+
+        return ReportResult(
+            request=request,
+            document=document,
+            queries=loop.queries,
+            steps=loop.steps,
+        )
