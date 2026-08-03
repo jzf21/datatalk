@@ -19,6 +19,11 @@ def ping(ctx: "TenantContext") -> str:
 
     Returns the model's reply text. Raises on auth / network errors so the
     caller can surface the failure.
+
+    Named ``health-check`` so tracing can drop it: ``/api/health`` runs on every
+    poll of the connection pill, and one open browser tab would otherwise file a
+    trace every ~30 seconds. See ``_UNEXPORTED_NAMES`` in
+    :mod:`datatalk.observability`.
     """
     resp = ctx.openai.chat.completions.create(
         model=ctx.settings.openai_model,
@@ -27,6 +32,7 @@ def ping(ctx: "TenantContext") -> str:
         # before the visible answer, so a tiny cap yields empty content.
         max_tokens=256,
         temperature=0,
+        **obs.llm_kwargs("health-check"),
     )
     return (resp.choices[0].message.content or "").strip()
 

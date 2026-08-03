@@ -85,6 +85,14 @@ Report generation is a **multi-agent pipeline** orchestrated by
 - `web/app.py` — streaming NDJSON endpoints. `web/deps.py` — request-scoped
   guards. `web/routes_auth.py`, `web/routes_orgs.py`.
 - `llm/prompts.py` — all system prompts.
+- `observability.py` — **the only module that names Langfuse.** Agents call
+  `obs.observe()` / `obs.start()` / `obs.agent_run()`, which degrade to a
+  no-op span object when no `LANGFUSE_*` credentials are set — so there are no
+  `if tracing:` branches in agent code. `configure()` (called from the app
+  lifespan) builds the client explicitly from `Settings`, because the Langfuse
+  SDK reads `os.environ` and never sees the `.env`; it also imports
+  `langfuse.openai`, whose `wrapt` patch instruments **every** OpenAI client in
+  the process, so model/token/cost capture costs no call-site change.
 - `frontend/` — Next.js App Router + shadcn/ui. Two fetch sites only
   (`lib/api/client.ts`, `lib/api/stream.ts`); both send `credentials: "include"`.
 

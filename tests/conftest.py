@@ -19,9 +19,17 @@ import pytest
 from cryptography.fernet import Fernet
 from sqlalchemy.orm import Session
 
-from datatalk.config import Settings, get_settings
-from datatalk.context import TenantContext
-from datatalk.db import models
+# Before any Settings is built (get_settings caches). A developer's .env holds
+# real Langfuse credentials, and the app lifespan configures tracing from it --
+# so without this every TestClient would ship the suite's synthetic traces to a
+# real project and block its teardown on a network flush. An environment
+# variable, not a fixture: it must beat the .env file at settings-load time, and
+# it must hold for tests that never opt in.
+os.environ["LANGFUSE_TRACING_ENABLED"] = "false"
+
+from datatalk.config import Settings, get_settings  # noqa: E402
+from datatalk.context import TenantContext  # noqa: E402
+from datatalk.db import models  # noqa: E402
 
 # --- scripted OpenAI double ---------------------------------------------------
 

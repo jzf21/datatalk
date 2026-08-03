@@ -70,6 +70,13 @@ _SECRET_HINTS = (
 _REDACTED = "<redacted>"
 _MASK_MAX_DEPTH = 12
 
+# Observations that are pure noise in a trace list. ``/api/health`` pings the
+# model on every poll of the connection pill, so one open browser tab produces a
+# trace every ~30 seconds -- burying real runs and skewing every dashboard that
+# counts traces. It is dropped at export rather than left un-instrumented so the
+# name still exists at the call site and the reason lives in one place.
+_UNEXPORTED_NAMES = frozenset({"health-check"})
+
 _LOCK = threading.RLock()
 _configured = False
 _enabled = False
@@ -161,6 +168,12 @@ def configure(settings: "Settings | None" = None, *, force: bool = False) -> boo
                 sample_rate=s.langfuse_sample_rate,
                 debug=s.langfuse_debug,
                 mask=_mask,
+                # has_langfuse has already decided this from .env. Note the SDK
+                # lets a ``LANGFUSE_TRACING_ENABLED=false`` in the *process*
+                # environment override this argument, which is the escape hatch
+                # an operator wants: kill tracing without editing config.
+                tracing_enabled=True,
+                should_export_span=_should_export_span,
             )
             # Patches the OpenAI SDK process-wide (wrapt, on the resource class),
             # so clients built before this import are instrumented too. Imported
@@ -214,6 +227,18 @@ def shutdown() -> None:
 
 
 # --- masking ------------------------------------------------------------------
+
+
+def _should_export_span(span: Any) -> bool:
+    """Drop health-probe spans before they reach Langfuse.
+
+    Never raises: an exception here would be raised inside the SDK's exporter,
+    on a background thread, where it is invisible. Default to exporting.
+    """
+    try:
+        return getattr(span, "name", "") not in _UNEXPORTED_NAMES
+    except Exception:  # noqa: BLE001
+        return True
 
 
 def _mask(*, data: Any, **_: Any) -> Any:
