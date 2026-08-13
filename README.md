@@ -16,19 +16,6 @@ to query — so a single report can pull traffic from a ClickHouse events wareho
 from a Postgres billing database, and relate the two. (One SQL statement still runs against one
 source; DataTalk composes the results rather than joining across warehouses.)
 
-## Status
-
-Built incrementally by milestone:
-
-- [x] **M1 — Connection checkout**: connect to ClickHouse, discover schema, verify OpenAI key.
-- [x] **M2 — Safe read-only SQL execution**: tokenizer-based guardrails (30 tests).
-- [x] **M3 — Text-to-SQL report agent**: agentic `run_sql` tool loop → narrative report.
-- [x] **M4 — Report analysis**: analyze own + external reports.
-- [x] **M5 — Few-shot memory**: "training" from user suggestions (embeddings).
-- [x] **M6 — Web UI**: FastAPI + streaming NDJSON, Next.js frontend.
-- [x] **M7 — Multi-tenancy**: Postgres, auth, orgs, per-org encrypted connections.
-- [x] **M8 — Multi-source**: pluggable warehouse adapters (ClickHouse + PostgreSQL), several
-      sources per workspace, agent-chosen per query.
 
 ## Setup
 
