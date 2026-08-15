@@ -9,7 +9,9 @@ from datatalk.agent.blocks import (
     Stat,
     Table,
     count_data_blocks,
+    dematerialize,
     document_to_text,
+    frozen_stat_count,
     materialize,
     parse_json_object,
     validate_references,
@@ -506,3 +508,79 @@ def test_validate_references_ignores_bad_hints():
              direction="sideways"),
     ])
     assert validate_references(doc, {"q1": _dataset()}) == []
+
+
+# --- de-materialization (the refresh path) -----------------------------------
+
+
+def test_an_authoring_document_survives_a_json_round_trip():
+    """The property the whole refresh feature rests on.
+
+    The authoring document is persisted as JSONB and read back before every
+    refresh. block_to_dict drops None fields, so this asserts that every dropped
+    field's dataclass default *is* its semantics ("row_index=None means the last
+    row", "columns=None means all columns") rather than a value being lost.
+    """
+    doc = Document(blocks=[
+        Heading(text="Overview", level=2),
+        Row(children=[
+            Stat(dataset_id="q1", value_col="issues", label="Issues",
+                 row_index=0, delta_col="resolved", direction="down_is_good",
+                 width=3),
+            Table(dataset_id="q1", columns=None, width=9),
+        ]),
+        Chart(chart_type="line", title="Trend", dataset_id="q1",
+              x_col="month", series_cols=["issues", "resolved"],
+              unit="count", stacked=True),
+    ])
+    assert Document.from_dict(doc.to_dict()).to_dict() == doc.to_dict()
+
+
+def test_dematerialize_round_trips_a_table_and_a_chart():
+    authoring = Document(blocks=[
+        Row(children=[
+            Table(dataset_id="q1", columns=["month", "issues"], width=6),
+            Chart(chart_type="line", title="Trend", dataset_id="q1",
+                  x_col="month", series_cols=["issues", "resolved"],
+                  unit="count", stacked=True, width=6),
+        ]),
+    ])
+    round_tripped = dematerialize(materialize(authoring, {"q1": _dataset()}))
+    assert round_tripped.to_dict() == authoring.to_dict()
+
+
+def test_dematerialize_leaves_a_materialized_stat_alone():
+    """A stat's value_col is gone after materialization; guessing it would
+    render a confidently wrong KPI, so the block is returned untouched."""
+    authoring = Document(blocks=[
+        Stat(dataset_id="q1", value_col="issues", label="Issues"),
+    ])
+    materialized = materialize(authoring, {"q1": _dataset()})
+    out = dematerialize(materialized)
+
+    stat = out.blocks[0]
+    assert isinstance(stat, Stat)
+    assert stat.value == 20  # the last row's `issues`, still there
+    assert stat.value_col is None
+    assert frozen_stat_count(out) == 1
+
+    # And materializing again is a no-op for it: not authoring form, so it keeps
+    # its old value rather than degrading to a note.
+    again = materialize(out, {"q1": _dataset()})
+    assert again.blocks[0].value == 20
+
+
+def test_frozen_stat_count_recurses_into_rows_and_ignores_authoring_stats():
+    doc = Document(blocks=[
+        Row(children=[
+            Stat(dataset_id="q1", value_col="issues", label="A"),  # authoring
+            Stat(dataset_id="q1", label="B", value=7),             # frozen
+        ]),
+        Stat(dataset_id="q1", label="C", value=9),                 # frozen
+    ])
+    assert frozen_stat_count(doc) == 2
+
+
+def test_dematerialize_preserves_headings_and_paragraphs():
+    doc = Document(blocks=[Heading(text="H"), Paragraph(text="p")])
+    assert dematerialize(doc).to_dict() == doc.to_dict()

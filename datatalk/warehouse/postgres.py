@@ -14,6 +14,7 @@ Two things here are load-bearing and easy to lose in a refactor:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 import psycopg
@@ -62,6 +63,7 @@ POSTGRES_DIALECT = Dialect(
     ),
     supports_dollar_quoting=True,
     identifier_quote='"',
+    param_style="pyformat",
     prompt_hint=(
         "PostgreSQL dialect: date_trunc('month', ts), now(), count(*), "
         "count(DISTINCT x), etc. Qualify tables as schema.table."
@@ -128,7 +130,14 @@ class PostgresWarehouse(BaseWarehouse):
             raise WarehouseError(str(exc)) from exc
         return {"version": str(version), "database": str(database)}
 
-    def query(self, sql: str, *, timeout_s: int, max_rows: int) -> QueryResult:
+    def query(
+        self,
+        sql: str,
+        *,
+        timeout_s: int,
+        max_rows: int,
+        parameters: Mapping[str, Any] | None = None,
+    ) -> QueryResult:
         try:
             with self._pool.connection() as conn:
                 with conn.transaction(), conn.cursor() as cur:
@@ -139,7 +148,10 @@ class PostgresWarehouse(BaseWarehouse):
                             pgsql.Literal(max(1, int(timeout_s)) * 1000)
                         )
                     )
-                    cur.execute(sql)
+                    # None, not {}: see _read below. An empty mapping still makes
+                    # psycopg scan for placeholders, turning any literal % in an
+                    # unparameterized statement into an error.
+                    cur.execute(sql, parameters or None)
                     if cur.description is None:
                         # A statement that returns nothing got through
                         # validation; treat it as an empty result rather than

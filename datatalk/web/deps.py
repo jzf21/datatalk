@@ -9,6 +9,20 @@ branch on them:
     409 no_connection         -> open the connection settings panel
     403 cross_origin_request  -> should never reach a real user
 
+Dashboards (see web/app.py):
+
+    404 dashboard_not_found    -> deleted, or belongs to another org
+    409 refresh_in_progress    -> a refresh is already in flight for this dashboard.
+                                  Soft: the client keeps what it has rather than
+                                  showing an error -- two tabs auto-refreshing the
+                                  same dashboard collide routinely, and the guard
+                                  protects the warehouse, not correctness.
+    400 filter_unknown         -> a filter id not defined on this dashboard
+    400 filter_value_invalid   -> value failed type coercion or the option allowlist
+    409 filters_configuring    -> a filter-configuration run is in flight
+    409 filter_rewrite_failed  -> no captured query could be rewritten to accept
+                                  these filters, so the controls would be inert
+
 Context model (see web/routes_datacontext.py):
 
     404 context_file_not_found -> the file was deleted, or belongs to another org

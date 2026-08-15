@@ -1,8 +1,16 @@
 "use client";
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  keepPreviousData,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 
+import { ApiError } from "./client";
 import * as api from "./endpoints";
+import { filterSignature } from "@/lib/dashboards/filters";
+import type { FilterDefInput, FilterValues } from "./types";
 
 /** One place to spell every key, so invalidation can never drift from fetching. */
 export const qk = {
@@ -12,6 +20,13 @@ export const qk = {
   report: (id: number) => ["report", id] as const,
   dashboards: ["dashboards"] as const,
   dashboard: (id: number) => ["dashboard", id] as const,
+  // A separate root from `dashboard`, deliberately. Nested under it, the
+  // useAnalyzeDashboard invalidation below would prefix-match and discard every
+  // cached materialization -- re-running warehouse SQL because someone clicked
+  // Analyze. `dashboardDataAll` is the prefix for "every filter combination".
+  dashboardData: (id: number, sig: string) =>
+    ["dashboard-data", id, sig] as const,
+  dashboardDataAll: (id: number) => ["dashboard-data", id] as const,
   suggestions: ["suggestions"] as const,
   context: (orgId: string | null) => ["context", orgId] as const,
   contextFile: (orgId: string | null, path: string) =>
@@ -50,6 +65,76 @@ export function useDashboard(id: number | null) {
     queryKey: qk.dashboard(id ?? -1),
     queryFn: () => api.getDashboard(id!),
     enabled: id !== null && Number.isInteger(id),
+  });
+}
+
+/**
+ * A dashboard's *live* document: its captured queries, re-run now.
+ *
+ * A query rather than a mutation on a timer, because this is server state keyed
+ * by (dashboard, filter values) -- which is exactly what TanStack caches. As a
+ * mutation we would hand-roll the interval, the in-flight guard, the tab-hidden
+ * pause, the per-filter cache and previous-data retention; all five come free
+ * here, and query-core already skips an interval tick while the tab is hidden
+ * and dedupes a tick against an in-flight fetch, so polls cannot stack.
+ */
+export function useDashboardData(
+  id: number | null,
+  filters: FilterValues,
+  refreshMs: number | null,
+  enabled = true,
+) {
+  const signature = filterSignature(filters);
+  return useQuery({
+    queryKey: qk.dashboardData(id ?? -1, signature),
+    queryFn: async ({ signal }) => {
+      try {
+        return await api.refreshDashboard(id!, filters, signal);
+      } catch (err) {
+        // Another tab (or a double-click) holds the per-dashboard guard. That
+        // is not an error worth showing: the numbers on screen are still the
+        // ones we have, and the next tick will get through.
+        // `message` carries the raw machine code -- see announceApiError, which
+        // compares it the same way. Wording is applied only at display time.
+        if (err instanceof ApiError && err.message === "refresh_in_progress") {
+          return null;
+        }
+        throw err;
+      }
+    },
+    enabled: enabled && id !== null && Number.isInteger(id),
+    // Deliberately not the app-wide 30s: this number is about warehouse cost.
+    // Long enough that arriving straight from the generator does not re-run SQL
+    // that just ran, short enough that any real revisit refetches -- which is
+    // the whole bug being fixed.
+    staleTime: 15_000,
+    gcTime: 5 * 60_000,
+    // Changing a filter must never blank the grid.
+    placeholderData: keepPreviousData,
+    // Function form, so the clock restarts after each fetch *finishes*.
+    refetchInterval: (query) =>
+      refreshMs && query.state.fetchStatus === "idle" ? refreshMs : false,
+    // Overrides the app-wide false, but only while polling: returning to a live
+    // dashboard should catch up immediately, a parked one should stay quiet.
+    refetchOnWindowFocus: refreshMs !== null,
+    // A refresh runs real warehouse SQL; an automatic retry doubles the load on
+    // exactly the failure it is meant to survive.
+    retry: 0,
+  });
+}
+
+export function useUpdateDashboardFilters(id: number) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (filters: FilterDefInput[]) =>
+      api.updateDashboardFilters(id, filters),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.dashboard(id) });
+      // Not invalidate: changed definitions mean every cached materialization is
+      // the answer to a question this dashboard no longer asks, so they are
+      // dropped outright rather than refetched.
+      qc.removeQueries({ queryKey: qk.dashboardDataAll(id) });
+    },
   });
 }
 

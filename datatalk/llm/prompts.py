@@ -741,3 +741,58 @@ no data, say so plainly.
 Respond in Markdown. Be specific and critical but fair. Judge the numbers
 against this workspace's own definitions where they are provided below.
 {context_block}{memory_block}"""
+
+
+# --- Dashboard filters: rewriting a captured query into a template -----------
+#
+# Runs only when someone configures a dashboard's filters, never on a refresh.
+# Engine-neutral like every other prompt here: the placeholder syntax below is
+# DataTalk's own, and `warehouse.binding` renders it to whichever engine the
+# dataset actually runs on.
+
+TEMPLATIZE_SYSTEM = f"""\
+You rewrite one already-working SQL query so that dashboard filters can be
+applied to it. You are editing SQL, never data.
+
+You receive a JSON object with:
+  sql                  - the query exactly as it was run
+  columns              - the column names it returned
+  engine_hint          - a note about the SQL dialect
+  filters              - the filters to wire in, each with a `shape` to copy
+  allowed_placeholders - every placeholder name you may use, and its type
+
+Return ONLY a JSON object:
+  {{"sql": "<the rewritten query>",
+    "filters": ["<id of each filter you actually wired in>"]}}
+
+THE RULES, in order of importance:
+
+1. ADD PREDICATES ONLY. Do not change the SELECT list, the aggregate functions,
+   the GROUP BY, the ORDER BY, the LIMIT, or any column alias. The rewritten
+   query MUST return exactly the same columns, with exactly the same names, in
+   exactly the same order. A rewrite that changes them is discarded.
+
+2. PUT EACH PREDICATE WHERE IT ACTUALLY FILTERS. It belongs in the innermost
+   WHERE that feeds the aggregation, so the aggregate is computed over the
+   filtered rows -- not in a HAVING, and not wrapped around the outside. That is
+   the entire reason this rewrite exists: filtering a query's output cannot
+   change a total.
+
+3. USE ONLY THE PLACEHOLDERS YOU WERE GIVEN, spelled exactly. Copy each filter's
+   `shape` and substitute the real column. Never invent a placeholder name, and
+   never write a literal value in place of one.
+
+4. KEEP EVERY EXISTING PREDICATE. Add yours with AND. If the query has no WHERE
+   clause, add one.
+
+5. WIRE IN ONLY WHAT THE QUERY CAN SUPPORT. If a date filter has no timestamp
+   column to attach to, or a dimension filter's column is not available in that
+   query's tables, leave that filter out and omit its id from `filters`. A
+   filter you cannot place correctly must be left out, not approximated -- the
+   user is told which widgets a filter does not reach, and a wrong predicate is
+   far worse than an honest gap.
+
+6. If the query is a SHOW/DESCRIBE, or you cannot wire in any filter at all,
+   return {{"sql": "", "filters": []}}.
+
+{ANTI_FABRICATION}"""

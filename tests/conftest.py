@@ -149,8 +149,18 @@ class FakeWarehouse:
         self.version = version
         self.database = database
         self.queries: list[str] = []
+        # Recorded alongside the SQL, one entry per query. The filter tests
+        # assert that a value reached the driver as a *parameter* and never
+        # appeared in the statement text, which is only checkable if both
+        # halves are kept.
+        self.parameter_sets: list[dict | None] = []
         self.introspections = 0
         self.closed = False
+
+    def set_rows(self, columns, rows):
+        """Change what the next query returns, for refresh tests."""
+        self._columns = list(columns)
+        self._rows = [list(r) for r in rows]
 
     def _maybe_fail(self):
         if self.fail is not None:
@@ -160,11 +170,12 @@ class FakeWarehouse:
         self._maybe_fail()
         return {"version": self.version, "database": self.database}
 
-    def query(self, sql, *, timeout_s, max_rows):
+    def query(self, sql, *, timeout_s, max_rows, parameters=None):
         from datatalk.warehouse.base import QueryResult
 
         self._maybe_fail()
         self.queries.append(sql)
+        self.parameter_sets.append(dict(parameters) if parameters else None)
         rows = self._rows[:max_rows]
         return QueryResult(
             columns=list(self._columns),
@@ -514,6 +525,25 @@ def connectionless_client(api_client):
     """
     api_client.org_id = signup(api_client)
     return api_client
+
+
+@pytest.fixture
+def ctx_warehouse(monkeypatch):
+    """The warehouse every source in a web test resolves to.
+
+    Patched at the client registry rather than via
+    ``TenantContext.warehouse_overrides``, so the request builds its tenant
+    context exactly as a real one does -- name resolution, fingerprinting and
+    all -- and only the final dial is faked. Tests that need a source to be
+    unreachable set ``.fail``; tests that need different numbers on a second
+    read call ``.set_rows``.
+    """
+    from datatalk import clients
+
+    warehouse = FakeWarehouse(columns=["metric", "current"], rows=[["rev", 120]])
+    monkeypatch.setattr(clients, "create_warehouse", lambda spec: warehouse)
+    clients.close_all()  # drop anything a previous test cached under this fp
+    return warehouse
 
 
 @pytest.fixture

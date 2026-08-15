@@ -103,6 +103,8 @@ export interface CapturedQuery {
   sql: string;
   row_count: number;
   columns: string[];
+  /** Which of the org's sources this ran against. Absent on pre-multi-source rows. */
+  source?: string | null;
 }
 
 // --- plain JSON endpoints --------------------------------------------------
@@ -184,6 +186,89 @@ export interface DashboardDetail extends DashboardSummary {
   insights: InsightSet;
   /** Markdown, or null when it has never been analyzed. */
   analysis: string | null;
+  /**
+   * Whether a refresh can replay this dashboard exactly. False for dashboards
+   * saved before the authoring document was kept: those still refresh, but
+   * their stat tiles stay frozen because the column each one read was never
+   * recorded (see agent/blocks.py `dematerialize`).
+   */
+  refreshable: boolean;
+  /** Per-dashboard filter definitions; {} when none are configured. */
+  filters: DashboardFilters;
+}
+
+/** Mirrors dashboards.filters in Postgres. Empty until filters are configured. */
+export interface DashboardFilters {
+  version?: number;
+  filters?: FilterDef[];
+}
+
+export interface FilterDef {
+  id: string;
+  kind: "date_range" | "dimension";
+  label: string;
+  /** dimension only */
+  column?: string;
+  source?: string;
+  multi?: boolean;
+  options?: string[];
+  /** True when the option probe hit its cap -- a UI badge, not a correctness issue. */
+  options_truncated?: boolean;
+  default?: FilterValue | null;
+}
+
+export type FilterValue =
+  | { preset?: string; from?: string; to?: string }
+  | { all?: boolean; values?: string[] };
+
+/** Selections keyed by filter id, as sent to /refresh. */
+export type FilterValues = Record<string, FilterValue>;
+
+/** What the client sends to define a filter; options and templates are derived. */
+export interface FilterDefInput {
+  id: string;
+  kind: "date_range" | "dimension";
+  label: string;
+  column?: string;
+  source?: string;
+  multi?: boolean;
+}
+
+export interface FilterConfigResponse {
+  filters: DashboardFilters;
+  /** Datasets the rewrite reached. */
+  wired: string[];
+  /** Datasets it could not, with the reason -- surfaced, never hidden. */
+  skipped: { dataset_id: string; reason: string }[];
+}
+
+/** One captured query's fate during a refresh. */
+export interface DatasetStatus {
+  dataset_id: string;
+  source: string | null;
+  status: "ok" | "unavailable" | "rejected" | "error" | "timeout";
+  ok: boolean;
+  reason?: string;
+  message?: string;
+  row_count?: number;
+  truncated?: boolean;
+  filtered?: boolean;
+}
+
+/** The body of POST /api/dashboards/{id}/refresh. */
+export interface DashboardData {
+  dashboard_id: number;
+  refreshed_at: string;
+  document: BlockDocument;
+  datasets: DatasetStatus[];
+  /** Some query failed, or some stat tile could not be rebuilt. */
+  partial: boolean;
+  /** False when replayed from a de-materialized document (legacy dashboard). */
+  exact: boolean;
+  frozen_stats: number;
+  /** Datasets no filter could be bound to, so their numbers ignore the selection. */
+  unfiltered: string[];
+  applied_filters: FilterValues;
 }
 
 export interface Suggestion {

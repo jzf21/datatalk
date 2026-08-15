@@ -12,15 +12,20 @@ import queue
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from typing import Any
+from datetime import datetime, timezone
+from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from datatalk import clients
+from datatalk import jsonsafe
 from datatalk import observability as obs
+from datatalk.dashboards import configure as configure_svc
+from datatalk.dashboards import refresh as refresh_svc
+from datatalk.dashboards.filters import FilterError
 from datatalk.agent.analyze import analyze_dashboard, analyze_report
 from datatalk.agent.dashboard import generate_dashboard
 from datatalk.agent.qa import answer_question
@@ -155,6 +160,28 @@ class DashboardRequest(BaseModel):
 class DashboardAnalyzeRequest(BaseModel):
     focus: str | None = None
     use_memory: bool = True
+
+
+class DashboardRefreshRequest(BaseModel):
+    """Filter selections to apply, keyed by filter id. Empty = refresh as captured."""
+
+    filters: dict[str, dict[str, Any]] = {}
+
+
+class FilterDefRequest(BaseModel):
+    """One filter to define. Options and templates are derived server-side."""
+
+    id: str = Field(pattern=r"^[a-z][a-z0-9_]{0,31}$")
+    kind: Literal["date_range", "dimension"]
+    label: str = Field(max_length=60)
+    # dimension only
+    column: str | None = Field(default=None, max_length=128)
+    source: str | None = Field(default=None, max_length=64)
+    multi: bool = True
+
+
+class DashboardFiltersRequest(BaseModel):
+    filters: list[FilterDefRequest] = Field(default_factory=list, max_length=8)
 
 
 class FeedbackRequest(BaseModel):
@@ -372,7 +399,11 @@ def dashboard(req: DashboardRequest, rctx: RequestContext = Depends(require_conn
             # generation would also pin a pooled connection for minutes.
             with session_scope() as db:
                 saved = MemoryStore(db, ctx=ctx).save_dashboard(
-                    req.request, res.document, res.queries, insights=res.insights
+                    req.request,
+                    res.document,
+                    res.queries,
+                    insights=res.insights,
+                    authoring_document=res.authoring_document,
                 )
             yield _ndjson(
                 "saved",
@@ -415,6 +446,116 @@ def analyze_dashboard_endpoint(
     return {"analysis": analysis}
 
 
+@api.post("/dashboards/{dashboard_id}/refresh")
+def refresh_dashboard_endpoint(
+    dashboard_id: int,
+    req: DashboardRefreshRequest,
+    rctx: RequestContext = Depends(require_connection),
+) -> Response:
+    """Re-run this dashboard's captured queries and return a fresh document.
+
+    Plain JSON rather than NDJSON: there is no LLM in this path, the queries run
+    concurrently and are each capped by their source's timeout, and -- decisively
+    -- a partially-arrived set of datasets is unrenderable. Materialization is
+    server-side by the project's core trust rule, so streaming per-query results
+    would force the frontend to reimplement ``materialize`` in TypeScript and
+    become a second, drifting source of truth for every number on screen.
+    """
+    saved = rctx.store.get_dashboard(dashboard_id)
+    if not saved:
+        # Cross-org ids land here too (the store's read is org-scoped), so a 404
+        # never confirms that another workspace has a dashboard with this id.
+        raise HTTPException(status_code=404, detail="dashboard_not_found")
+
+    ctx = rctx.tenant  # bound on the request thread, as everywhere else
+    org_id = ctx.org_id
+
+    if not refresh_svc.try_acquire(org_id, dashboard_id):
+        raise HTTPException(status_code=409, detail="refresh_in_progress")
+    try:
+        # The warehouse round trip can take tens of seconds; holding the pooled
+        # Postgres connection across it is exactly the pinning the streaming
+        # endpoints above go out of their way to avoid.
+        rctx.release_db()
+        result = refresh_svc.refresh_dashboard(
+            saved, ctx=ctx, selections=req.filters
+        )
+    except FilterError as exc:
+        # A bad selection is the caller's, so it is a 400 with a stable code --
+        # and it is raised before any SQL runs.
+        raise HTTPException(status_code=400, detail=exc.code) from exc
+    finally:
+        refresh_svc.release(org_id, dashboard_id)
+
+    payload = {
+        "dashboard_id": dashboard_id,
+        "refreshed_at": datetime.now(timezone.utc).isoformat(),
+        "document": result.document.to_dict(),
+        "datasets": [d.to_dict() for d in result.datasets],
+        "partial": result.partial,
+        "exact": result.exact,
+        "frozen_stats": result.frozen_stats,
+        "unfiltered": result.unfiltered,
+        # Echoed back so the client can see what the server actually honoured
+        # and mark a filter whose definition has drifted.
+        "applied_filters": req.filters,
+    }
+    # jsonsafe, not FastAPI's default encoder. This document is never persisted,
+    # so unlike every other document on the wire it has passed through neither
+    # the JSONB serializer nor ndjson(). `json.dumps` defaults to
+    # allow_nan=True, and one NaN cell -- avg() over an empty group, routine once
+    # a filter narrows a window to nothing -- would emit a bare `NaN` token and
+    # make the browser reject the entire body.
+    return Response(
+        content=jsonsafe.dumps(payload), media_type="application/json"
+    )
+
+
+@api.put("/dashboards/{dashboard_id}/filters")
+def set_dashboard_filters_endpoint(
+    dashboard_id: int,
+    req: DashboardFiltersRequest,
+    rctx: RequestContext = Depends(require_connection),
+) -> dict[str, Any]:
+    """Define this dashboard's filters, rewriting its queries to accept them.
+
+    PUT rather than PATCH: `allow_methods` on the CORS middleware above does not
+    include PATCH, so a PATCH route would fail preflight with a browser-only
+    error. Not `require_admin` either -- filters are dashboard content, not
+    workspace configuration, so whoever may create a dashboard may filter one.
+    """
+    saved = rctx.store.get_dashboard(dashboard_id)
+    if not saved:
+        raise HTTPException(status_code=404, detail="dashboard_not_found")
+
+    ctx = rctx.tenant
+    org_id = ctx.org_id
+    defs = [d.model_dump(exclude_none=True) for d in req.filters]
+
+    if not configure_svc.try_acquire(org_id, dashboard_id):
+        raise HTTPException(status_code=409, detail="filters_configuring")
+    try:
+        rctx.release_db()  # the rewrite pass runs an LLM call plus N queries
+        filters, report = configure_svc.configure_filters(saved, defs, ctx=ctx)
+    finally:
+        configure_svc.release(org_id, dashboard_id)
+
+    if defs and not report.wired:
+        # Every dataset refused the rewrite. Persisting the definitions would
+        # leave controls on screen that cannot move a single number.
+        raise HTTPException(status_code=409, detail="filter_rewrite_failed")
+
+    with session_scope() as db:
+        MemoryStore(db, ctx=ctx).set_dashboard_filters(dashboard_id, filters)
+
+    return {
+        "filters": filters,
+        "wired": report.wired,
+        # Named, not hidden: a filter that reaches 3 of 5 widgets has to say so.
+        "skipped": report.skipped,
+    }
+
+
 @api.get("/dashboards")
 def list_dashboards(rctx: RequestContext = Depends(get_request_ctx)) -> dict[str, Any]:
     items = rctx.store.list_dashboards()
@@ -440,6 +581,12 @@ def get_dashboard(dashboard_id: int, rctx: RequestContext = Depends(get_request_
         "insights": d.insights,
         "analysis": d.analysis,
         "created_at": d.created_at,
+        # Whether a refresh can replay this dashboard exactly. False for rows
+        # saved before the authoring document was kept: those still refresh
+        # best-effort, but their stat tiles stay frozen, and the UI says so
+        # rather than silently showing a mix of fresh and stale numbers.
+        "refreshable": d.is_refreshable,
+        "filters": d.filters,
     }
 
 

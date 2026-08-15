@@ -407,6 +407,21 @@ class Dashboard(Base):
     # grid is shaped by them, so a saved dashboard without them loses the
     # "why these widgets" part of its own story.
     insights: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    # The document *before* materialization -- blocks that reference a dataset by
+    # id and column instead of holding values. This is what makes a dashboard
+    # refreshable: `document` cannot be reversed, because materializing a stat
+    # discards the column it read (see agent/blocks.py `dematerialize`). Empty
+    # `{}` marks a dashboard saved before this column existed; that emptiness IS
+    # the refreshability predicate, so no second flag column is needed.
+    authoring_document: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    # Per-dashboard filter definitions plus the per-dataset SQL templates they
+    # bind into. One column because a template exists only because a filter binds
+    # to that dataset, and the same request writes both.
+    filters: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
     analysis: Mapped[str | None] = mapped_column(Text)
     legacy_id: Mapped[int | None] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = _created_at()

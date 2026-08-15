@@ -85,10 +85,16 @@ export function formatDateTime(value: CellValue): string {
   });
 }
 
-export function formatRelativeTime(iso: string): string {
+/**
+ * "3 min ago". Pass `now` from a ticker (see `useNow`) where the label has to
+ * keep counting: read from the clock it is frozen at render time, which on a
+ * page that only re-renders when something happens means it stops being true
+ * for exactly as long as nothing does.
+ */
+export function formatRelativeTime(iso: string, now: number = Date.now()): string {
   const then = new Date(iso).getTime();
   if (Number.isNaN(then)) return "";
-  const secs = Math.round((Date.now() - then) / 1000);
+  const secs = Math.round((now - then) / 1000);
   if (secs < 60) return "just now";
   const mins = Math.round(secs / 60);
   if (mins < 60) return `${mins} min ago`;

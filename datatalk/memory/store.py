@@ -79,6 +79,23 @@ class SavedDashboard:
     insights: dict[str, Any] = field(default_factory=dict)
     analysis: str | None = None
     created_by_user_id: UUID | None = None
+    # The pre-materialization document, replayed by a refresh. Empty for
+    # dashboards saved before it was persisted -- see `is_refreshable`.
+    authoring_document: Document = field(default_factory=Document)
+    filters: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def is_refreshable(self) -> bool:
+        """Whether this dashboard can be refreshed exactly.
+
+        A real authoring document always has at least one block, so its emptiness
+        is the predicate -- no separate flag column that could drift from it.
+        False means "saved before the authoring document was kept": such a
+        dashboard still refreshes best-effort via
+        :func:`~datatalk.agent.blocks.dematerialize`, but its stat tiles stay
+        frozen because the column each one read was not recorded.
+        """
+        return bool(self.authoring_document.blocks)
 
 
 def _iso(value: datetime | None) -> str:
@@ -333,9 +350,11 @@ class MemoryStore:
         queries: list[dict[str, Any]] | None = None,
         title: str | None = None,
         insights: dict[str, Any] | None = None,
+        authoring_document: Document | None = None,
     ) -> SavedDashboard:
         queries = queries or []
         insights = insights or {}
+        authoring_document = authoring_document or Document()
         title = title or self._derive_title(request)
         row = models.Dashboard(
             org_id=self.org_id,
@@ -345,6 +364,8 @@ class MemoryStore:
             document=document.to_dict(),
             queries=queries,
             insights=insights,
+            authoring_document=authoring_document.to_dict(),
+            filters={},
             analysis=None,
         )
         self._db.add(row)
@@ -359,6 +380,8 @@ class MemoryStore:
             insights=insights,
             analysis=None,
             created_by_user_id=row.created_by_user_id,
+            authoring_document=authoring_document,
+            filters={},
         )
 
     @staticmethod
@@ -373,6 +396,8 @@ class MemoryStore:
             insights=dict(r.insights or {}),
             analysis=r.analysis,
             created_by_user_id=r.created_by_user_id,
+            authoring_document=Document.from_dict(r.authoring_document or {}),
+            filters=dict(r.filters or {}),
         )
 
     def get_dashboard(self, dashboard_id: int) -> SavedDashboard | None:
@@ -396,5 +421,21 @@ class MemoryStore:
             .where(models.Dashboard.id == dashboard_id)
             .where(models.Dashboard.org_id == self.org_id)
             .values(analysis=analysis)
+        )
+        return bool(result.rowcount)
+
+    def set_dashboard_filters(
+        self, dashboard_id: int, filters: dict[str, Any]
+    ) -> bool:
+        """Replace a dashboard's filter definitions and query templates.
+
+        Return whether a row was updated -- False for another org's id, which the
+        endpoint turns into a 404 rather than confirming the row exists.
+        """
+        result = self._db.execute(
+            update(models.Dashboard)
+            .where(models.Dashboard.id == dashboard_id)
+            .where(models.Dashboard.org_id == self.org_id)
+            .values(filters=filters)
         )
         return bool(result.rowcount)

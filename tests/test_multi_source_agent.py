@@ -667,9 +667,11 @@ class _BarrierWarehouse(FakeWarehouse):
         super().__init__(**kw)
         self._barrier = barrier
 
-    def query(self, sql, *, timeout_s, max_rows):
+    def query(self, sql, *, timeout_s, max_rows, parameters=None):
         self._barrier.wait(timeout=5)
-        return super().query(sql, timeout_s=timeout_s, max_rows=max_rows)
+        return super().query(
+            sql, timeout_s=timeout_s, max_rows=max_rows, parameters=parameters
+        )
 
 
 def test_a_batched_turn_runs_its_queries_concurrently():
@@ -757,11 +759,13 @@ def test_an_exceeded_deadline_finalizes_with_what_was_captured():
     """The wall-clock budget bounds a slow warehouse without discarding data."""
 
     class SlowWarehouse(FakeWarehouse):
-        def query(self, sql, *, timeout_s, max_rows):
+        def query(self, sql, *, timeout_s, max_rows, parameters=None):
             import time
 
             time.sleep(0.05)  # far past the 10ms budget below
-            return super().query(sql, timeout_s=timeout_s, max_rows=max_rows)
+            return super().query(
+                sql, timeout_s=timeout_s, max_rows=max_rows, parameters=parameters
+            )
 
     messages = _seed()
     ctx = make_ctx(

@@ -56,6 +56,26 @@ Report generation is a **multi-agent pipeline** orchestrated by
   (path + one-line summary) goes into every catalog-bearing prompt, and bodies
   are fetched on demand via the `read_context` tool. **Never put a body in the
   tree** — that recreates the context pressure the feature exists to relieve.
+- `dashboards/` — **live dashboards: refresh and filters.** Deliberately not
+  under `agent/`, because a refresh is *not* an agent run: `refresh.py`
+  re-executes the captured `queries[].sql` and calls the same `materialize()` on
+  the same authoring document the generation pipeline built, with no LLM in the
+  path. That identity is the whole design — there is no second rendering path, so
+  a refreshed number cannot be produced differently from a generated one. The
+  authoring document has to be *persisted* (`dashboards.authoring_document`)
+  because materialization is lossy: `_materialize_stat` drops `value_col`,
+  `row_index` and `delta_col`, so a stored document cannot be reversed.
+  `blocks.dematerialize()` does what it honestly can for dashboards saved before
+  that column existed — tables and charts round-trip, stat tiles are returned
+  **unchanged rather than guessed at**, because a KPI that refreshes to a
+  confidently wrong number is worse than one that visibly does not refresh.
+  `filters.py` coerces and allowlists selections; `configure.py` runs the one
+  model pass (`agent/templatize.py`) that rewrites a captured query into a
+  placeholder-bearing template, and **verifies it by execution** — the template
+  must return the identical column names, or it is discarded, because blocks
+  address columns by name. Filter values are bound by the driver
+  (`warehouse/binding.py`), never interpolated, so the executed SQL does not vary
+  with user input at all.
 - `warehouse/catalog.py` — schema discovery across *all* of an org's sources,
   introspected concurrently and cached per `(org_id, source fingerprint)`.
   `build_catalog()` renders column names only (it goes in every prompt);
@@ -144,6 +164,30 @@ Report generation is a **multi-agent pipeline** orchestrated by
   demoting the others and flushing first, or the index fires mid-transaction
   (`_set_default` in `web/routes_orgs.py`). Deleting the default promotes
   another, so an unqualified query always resolves.
+
+### Live-dashboard rules
+- **A refresh never writes the snapshot back.** `analysis` is prose *about* the
+  numbers in `document`, so replacing them would invalidate it without touching
+  it — and a filtered view is one viewer's question, not the dashboard. The
+  refreshed document is per-request; `refreshed_at` is a response field, not a
+  column.
+- **Serialize a refresh with `jsonsafe.dumps`, not FastAPI's encoder.** Every
+  other document on the wire was sanitized by the JSONB serializer or `ndjson()`;
+  this one passes through neither, and one `NaN` — routine once a filter narrows
+  a window to nothing — makes the browser reject the whole body.
+- **A dead query degrades its own blocks, never the dashboard**, by being absent
+  from the map handed to `materialize()`. Same posture as a source that will not
+  introspect rendering `UNAVAILABLE`.
+- **Filter values are bound, never quoted.** The engines disagree about backslash
+  escaping inside string literals, so one escaper cannot be right for both, and
+  the one written against Postgres semantics is exploitable on ClickHouse. Three
+  layers, in order: coerce to a Python type, check the persisted option
+  allowlist, then bind through the driver.
+- **"All" is a bound flag, never the expanded option list** — expanding it would
+  silently exclude whatever the option probe truncated, and anything added since.
+- **A filter reaches exactly the datasets it was wired to**, and the response
+  names the ones it did not (`unfiltered`). A widget silently unaffected by a
+  filter is the failure this design exists to avoid.
 
 ### Context-model rules
 - **The tree is always on; bodies never are.** `ContextModel.render_tree()`

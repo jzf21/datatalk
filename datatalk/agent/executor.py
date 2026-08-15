@@ -19,7 +19,8 @@ equivalent, so point ``CLICKHOUSE_USER`` at a read-only user (see README).
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
 
 from datatalk.warehouse.base import (
     ALLOWED_LEADERS,
@@ -194,7 +195,11 @@ def ensure_limit(
 
 
 def run_sql(
-    sql: str, *, ctx: "TenantContext", source: str | None = None
+    sql: str,
+    *,
+    ctx: "TenantContext",
+    source: str | None = None,
+    parameters: Mapping[str, Any] | None = None,
 ) -> QueryResult:
     """Validate, cap, and execute a read-only query against one of the org's sources.
 
@@ -203,6 +208,11 @@ def run_sql(
     that source's engine, :class:`~datatalk.context.UnknownSourceError` if the
     name is not configured, and
     :class:`~datatalk.context.NoConnectionError` if the org has no sources.
+
+    ``parameters`` are bound by the driver, never interpolated. Dashboard filter
+    values arrive this way, which is why validation below still sees a statement
+    that does not vary with user input: the guardrails check the same bytes on
+    every refresh, and the value is never among them.
     """
     ref = ctx.source(source)
     warehouse = ctx.warehouse(source)
@@ -214,4 +224,5 @@ def run_sql(
         safe_sql,
         timeout_s=ref.spec.sql_timeout_seconds,
         max_rows=ref.spec.sql_max_rows,
+        parameters=parameters,
     )

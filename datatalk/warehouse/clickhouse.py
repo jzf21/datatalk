@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 import clickhouse_connect
@@ -34,6 +35,7 @@ CLICKHOUSE_DIALECT = Dialect(
     ),
     supports_dollar_quoting=False,
     identifier_quote="`",
+    param_style="curly",
     prompt_hint=(
         "ClickHouse dialect: toStartOfMonth(), toDate(), count(), uniqExact(), "
         "etc. Qualify tables as database.table."
@@ -85,10 +87,20 @@ class ClickHouseWarehouse(BaseWarehouse):
             raise WarehouseError(str(exc)) from exc
         return {"version": str(version), "database": str(current_db)}
 
-    def query(self, sql: str, *, timeout_s: int, max_rows: int) -> QueryResult:
+    def query(
+        self,
+        sql: str,
+        *,
+        timeout_s: int,
+        max_rows: int,
+        parameters: Mapping[str, Any] | None = None,
+    ) -> QueryResult:
         try:
             result = self._client.query(
                 sql,
+                # `{name:Type}` placeholders, bound by the driver -- the same
+                # mechanism the introspection queries below already use.
+                parameters=dict(parameters) if parameters else None,
                 settings={
                     "max_execution_time": timeout_s,
                     # Server-side cap as a second layer over our row slicing.

@@ -69,6 +69,12 @@ class DashboardResult:
     # The insight pass's structured findings, verbatim. Persisted with the
     # dashboard so the grid's "lead with"/"do not show" reasoning survives.
     insights: dict[str, Any] = field(default_factory=dict)
+    # The document as the author emitted it, before materialize() resolved its
+    # dataset references into values. This is what a refresh replays, and it has
+    # to be persisted because materialization is lossy: a materialized stat no
+    # longer records which column it read. Defaulted because `empty_result` also
+    # builds a DashboardResult and has no authoring document to give.
+    authoring_document: Document = field(default_factory=Document)
 
 
 def _empty_document(reason: str) -> Document:
@@ -451,4 +457,5 @@ def _generate_dashboard(
         queries=loop.queries,
         steps=loop.steps,
         insights=insight.raw,
+        authoring_document=authoring,
     )

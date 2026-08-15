@@ -20,6 +20,7 @@ built once per request and handed to agent worker threads:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
@@ -68,6 +69,11 @@ class Dialect:
     # hide behind it.
     supports_dollar_quoting: bool = False
     identifier_quote: str = '"'
+    # How this engine spells a bound parameter. Data, not a subclass hook, for
+    # the same reason the rest of this class is: `warehouse.binding` renders a
+    # neutral template against it, and nothing outside this package ever learns
+    # that ClickHouse writes `{name:Type}` where Postgres writes `%(name)s`.
+    param_style: str = "pyformat"  # pyformat (psycopg) | curly (clickhouse)
     # Appended to the schema catalog so prompts stay engine-neutral.
     prompt_hint: str = ""
 
@@ -195,11 +201,26 @@ class Warehouse(Protocol):
         """
         ...
 
-    def query(self, sql: str, *, timeout_s: int, max_rows: int) -> QueryResult:
+    def query(
+        self,
+        sql: str,
+        *,
+        timeout_s: int,
+        max_rows: int,
+        parameters: Mapping[str, Any] | None = None,
+    ) -> QueryResult:
         """Run one already-validated read-only statement.
 
         ``max_rows`` is a cap, not a hint: implementations return at most that
         many rows and set ``truncated`` when more were available.
+
+        ``parameters`` are bound by the driver, so a value never becomes part of
+        the statement text. Dashboard filters travel this way rather than as
+        quoted literals: the two engines disagree about backslash escaping inside
+        string literals, so one hand-written escaper cannot be correct for both,
+        and the one written against Postgres semantics is exploitable on
+        ClickHouse. ``None`` (not ``{}``) means "no parameters" -- see the
+        Postgres adapter for why the distinction matters.
         """
         ...
 

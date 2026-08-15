@@ -1,9 +1,13 @@
-import { apiDelete, apiGet, apiPost } from "./client";
+import { apiDelete, apiGet, apiPost, apiPut } from "./client";
 import { streamNdjson } from "./stream";
 import type {
   AnalyzeResponse,
+  DashboardData,
   DashboardDetail,
   DashboardSummary,
+  FilterConfigResponse,
+  FilterDefInput,
+  FilterValues,
   HealthResponse,
   ReportDetail,
   ReportSummary,
@@ -64,6 +68,25 @@ export const analyzeDashboard = (
     focus: focus || null,
     use_memory: useMemory,
   });
+
+/**
+ * Re-run a dashboard's captured queries and return a freshly materialized
+ * document. A POST because it spends warehouse time and carries a body, but
+ * semantically a read: it never writes the stored snapshot back.
+ */
+export const refreshDashboard = (
+  id: number,
+  filters: FilterValues,
+  signal?: AbortSignal,
+) => apiPost<DashboardData>(`/api/dashboards/${id}/refresh`, { filters }, signal);
+
+/**
+ * Define a dashboard's filters. The server probes each dimension's values and
+ * rewrites the captured queries to accept the filters, verifying each rewrite by
+ * running it -- so this is slow (an LLM call plus N queries) and deliberate.
+ */
+export const updateDashboardFilters = (id: number, filters: FilterDefInput[]) =>
+  apiPut<FilterConfigResponse>(`/api/dashboards/${id}/filters`, { filters });
 
 // --- analyze ---------------------------------------------------------------
 

@@ -343,6 +343,75 @@ def materialize(doc: Document, datasets: dict[str, Any]) -> Document:
     return Document(blocks=[_materialize_block(b, datasets) for b in doc.blocks])
 
 
+# --- de-materialization ------------------------------------------------------
+#
+# Refreshing a dashboard means re-running its queries and materializing the
+# *authoring* document again. Dashboards saved before the authoring document was
+# persisted have only the materialized one, and materialization is lossy, so this
+# recovers what it honestly can and leaves the rest alone.
+
+
+def _dematerialize_block(b: Any) -> Any:
+    if isinstance(b, Row):
+        return Row(children=[_dematerialize_block(c) for c in b.children], width=b.width)
+
+    if isinstance(b, Table) and b.rows is not None:
+        # Exact: `columns` is the authoring field, reused as-is by
+        # _materialize_table. Dropping `rows` is the whole reversal.
+        return Table(dataset_id=b.dataset_id, columns=b.columns, width=b.width)
+
+    if isinstance(b, Chart) and b.x is not None:
+        # Exact in practice: _materialize_chart writes x["label"] from x_col and
+        # each series' "name" from a series_col, so both survive verbatim.
+        return Chart(
+            chart_type=b.chart_type,
+            title=b.title,
+            dataset_id=b.dataset_id,
+            x_col=(b.x or {}).get("label"),
+            series_cols=[s.get("name") for s in (b.series or [])] or None,
+            unit=b.unit,
+            stacked=b.stacked,
+            width=b.width,
+        )
+
+    # A materialized Stat is NOT recoverable and must not be guessed at.
+    # _materialize_stat keeps `value`/`delta`/`delta_pct` but drops `value_col`,
+    # `row_index` and `delta_col`, and nothing left on the block identifies which
+    # column it read. Recovering it would mean matching the stored scalar against
+    # the dataset's columns -- ambiguous the moment two columns share a value --
+    # or taking the last column, which is a guess. A KPI that refreshes to a
+    # confidently rendered *wrong* number is far worse than one that visibly does
+    # not refresh, so the block is returned untouched: materialize() then leaves
+    # it alone (it is not authoring form) and it keeps its last known value.
+    return b
+
+
+def dematerialize(doc: Document) -> Document:
+    """Best-effort inverse of :func:`materialize`, for dashboards with no authoring copy.
+
+    Tables and charts round-trip exactly. Stats cannot -- see the note above --
+    and are returned unchanged, so a caller that materializes the result gets
+    fresh tables and charts beside a frozen stat rather than a fabricated one.
+    Use :func:`frozen_stat_count` to tell the user which is which.
+    """
+    return Document(blocks=[_dematerialize_block(b) for b in doc.blocks])
+
+
+def frozen_stat_count(doc: Document) -> int:
+    """How many stat blocks :func:`dematerialize` could not reverse."""
+
+    def walk(blocks: list[Any]) -> int:
+        total = 0
+        for b in blocks:
+            if isinstance(b, Row):
+                total += walk(b.children)
+            elif isinstance(b, Stat) and b.value is not None:
+                total += 1
+        return total
+
+    return walk(doc.blocks)
+
+
 # --- reference validation ----------------------------------------------------
 
 @dataclass(frozen=True)

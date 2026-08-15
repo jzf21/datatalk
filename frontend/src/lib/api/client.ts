@@ -46,6 +46,16 @@ const DETAIL_MESSAGES: Record<string, string> = {
   context_exists:
     "Regenerating from scratch would discard the current context. Confirm to continue.",
   context_generating: "Context is already being generated for this workspace.",
+  dashboard_not_found: "That dashboard no longer exists.",
+  // Soft in practice: the dashboard page keeps the numbers it already has
+  // rather than surfacing this, because two tabs polling one dashboard collide
+  // routinely and the guard protects the warehouse, not correctness.
+  refresh_in_progress: "This dashboard is already refreshing.",
+  filter_unknown: "That filter is no longer defined on this dashboard.",
+  filter_value_invalid: "That filter value isn't one of the available options.",
+  filters_configuring: "Filters are already being set up for this dashboard.",
+  filter_rewrite_failed:
+    "None of this dashboard's queries could be rewritten to accept those filters.",
 };
 
 export function apiErrorMessage(detail: string): string {
@@ -119,10 +129,17 @@ export function apiGet<T>(path: string, signal?: AbortSignal): Promise<T> {
   return request<T>(path, { method: "GET", signal });
 }
 
-export function apiPost<T>(path: string, body?: unknown): Promise<T> {
+export function apiPost<T>(
+  path: string,
+  body?: unknown,
+  signal?: AbortSignal,
+): Promise<T> {
   return request<T>(path, {
     method: "POST",
     body: JSON.stringify(body ?? {}),
+    // Load-bearing for the dashboard refresh: without it, navigating away or
+    // changing a filter mid-flight leaves a warehouse query running to nobody.
+    signal,
   });
 }
 
