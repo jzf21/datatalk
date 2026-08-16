@@ -54,6 +54,24 @@ the thesis holds.
 
 Run one arm with `--arm with-context` or `--arm no-context`.
 
+**What the gap is and is not.** The reference queries encode *this workspace's*
+definitions — revenue excludes cancelled orders, an active customer is one who
+ordered. On a `definition` case the no-context arm is therefore being marked
+against a convention it has no way to discover, and it fails by construction.
+
+That is the claim, not a flaw in it: the whole premise is that a schema does not
+carry meaning, so an agent without the meaning cannot be right except by luck,
+and every deployment of a text-to-SQL agent onto a real warehouse is exactly
+this situation. But it does bound what the number proves. It is a measurement of
+**how much a workspace's own definitions are worth to the agent**, not of the
+model's SQL ability in the abstract — and read as the latter it would be
+inflated. The non-`definition` tags (`join`, `ranking`, `window-function`,
+`multi-source`) are the ones that measure SQL competence, and they move far less
+between the arms.
+
+The honest one-line version: *given a workspace that has written its definitions
+down, loading them raises execution accuracy from 33% to 87%.*
+
 ---
 
 ## How scoring works
@@ -185,17 +203,29 @@ the harness recovers the datasets by re-executing the recorded SQL — exactly
 what `dashboards/refresh.py` does to refresh a live dashboard. Same statement,
 deterministic fixture, same rows.
 
-### Cross-engine mode
+### Cross-engine mode — implemented, not yet verified
+
+> **Status: untested against a live ClickHouse.** The code path
+> (`seed_clickhouse`, the ClickHouse DDL, the `sql_clickhouse` reference forms,
+> the compose profile) is written and every case carries its ClickHouse
+> reference, but no run has executed against a real server — the image would
+> not pull on the machine this was built on. Treat the first run as a debugging
+> session, not a measurement. The Postgres-only path below is the one with a
+> published baseline.
 
 ```bash
 docker compose --profile evals up -d
 datatalk-eval seed --events-engine clickhouse
+datatalk-eval validate --events-engine clickhouse   # do this first
 datatalk-eval run --events-engine clickhouse
 ```
 
 This moves `events` onto ClickHouse, so a single cross-source question requires
 the agent to write two different dialects and send each to the source that
-speaks it. Routing accuracy only becomes a strong claim in this mode.
+speaks it. Routing accuracy only becomes a strong claim in this mode — and note
+that `CASE ... END` is currently rejected on Postgres sources but accepted on
+ClickHouse (see the baseline note), so the two engines are not yet being held to
+the same standard.
 
 ---
 

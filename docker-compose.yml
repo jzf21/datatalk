@@ -30,6 +30,10 @@ services:
   #   docker compose --profile evals up -d
   #   datatalk-eval seed --events-engine clickhouse
   #
+  # NOT YET VERIFIED against a live server -- see docs/evals.md. The seeding and
+  # reference-query code is written and unit-covered, but no run has executed
+  # here, so expect to debug rather than to measure on the first attempt.
+  #
   # Behind a profile because nothing else in the project needs it. It exists so
   # the eval suite can be genuinely cross-engine: with events on ClickHouse and
   # sales on Postgres, a single question forces the agent to write two dialects

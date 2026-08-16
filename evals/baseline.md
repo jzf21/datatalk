@@ -1,3 +1,23 @@
+<!--
+BASELINE. Committed as the number to diff against; regenerate with
+
+    datatalk-eval run --repeat 3 --out evals/baseline.json
+
+Two things that will move this number, so that a future diff is not mistaken
+for a regression:
+
+1. `CASE ... END` is currently REJECTED on Postgres sources. The Postgres
+   dialect forbids `END` as transaction control (it is a synonym for COMMIT),
+   which also catches the terminator of every CASE expression; ClickHouse
+   accepts the same statement. Several attempts below lose a turn to it
+   (`mom-growth-h1`, `mobile-share-q2`). Fixing that guardrail should RAISE
+   accuracy, particularly on `ratio` and `window-function`.
+2. The reference queries encode this workspace's own definitions, so the
+   no-context arm fails `definition` cases by construction. See the caveat in
+   docs/evals.md -- the gap measures what written-down definitions are worth,
+   not SQL ability in the abstract.
+-->
+
 # DataTalk eval — `retail` / `analyst`
 
 - Model: `openai/gpt-oss-120b`

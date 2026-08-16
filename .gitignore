@@ -41,6 +41,5 @@ htmlcov/
 # --- Eval run artifacts ---
 # `datatalk-eval run --out` writes a JSON record per run. The committed
 # baseline (evals/baseline.md) is the number to compare against; the raw
-# per-attempt JSON is a working file, not history.
+# per-attempt JSON beside it is a working file, not history.
 evals/*.json
-!evals/baseline.md

@@ -144,7 +144,11 @@ def seed_clickhouse(
     counts: dict[str, int] = {}
     try:
         client.command(f"CREATE DATABASE IF NOT EXISTS {spec.database}")
-        client.command(f"USE {spec.database}")
+        # No `USE`: the client is built with autogenerate_session_id=False (the
+        # adapter's setting, because ClickHouse serializes concurrent queries on
+        # one session), and over HTTP without a session there is nothing for
+        # `USE` to change. Every statement below names the database explicitly
+        # instead, which is what makes that safe.
         for name in tables:
             client.command(f"DROP TABLE IF EXISTS {spec.database}.{name}")
             ddl = dataset.CLICKHOUSE_DDL[name].replace(

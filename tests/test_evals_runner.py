@@ -17,8 +17,7 @@ from types import SimpleNamespace
 import pytest
 
 from datatalk.context import TenantContext
-from datatalk.evals.cases import parse_case
-from datatalk.evals.cases import Suite
+from datatalk.evals.cases import Suite, parse_case
 from datatalk.evals.runner import (
     CountingOpenAI,
     compute_expected,
