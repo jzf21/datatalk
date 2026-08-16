@@ -1,0 +1,322 @@
+{
+  "name": "retail",
+  "_comment": [
+    "Golden cases over the fixture in datatalk/evals/dataset.py.",
+    "",
+    "Every window is an absolute date: the fixture covers 2025-01-01..2025-06-30",
+    "and a case phrased 'last quarter' would answer differently every quarter.",
+    "",
+    "Expectations avoid month/date LABELS as matched columns. Formatting a month",
+    "as 2025-03, 2025-03-01 or 'March' are all correct answers to the same",
+    "question, and a scorer that insisted on one would be measuring presentation.",
+    "Where the grouping is temporal the reference projects the MEASURE only and",
+    "the case is order-sensitive, so chronology is still enforced -- through the",
+    "ordering, which is unambiguous, rather than through a label, which is not.",
+    "",
+    "Tags: aggregation join filter time-window ranking ratio window-function",
+    "definition multi-source routing. 'definition' marks a case whose correct",
+    "answer depends on a business rule that exists only in the context model --",
+    "those are the cases the with/without-context A/B is really measuring."
+  ],
+  "cases": [
+    {
+      "id": "revenue-by-category-q1",
+      "question": "What was total revenue by product category in Q1 2025 (1 January to 31 March)?",
+      "tags": ["aggregation", "join", "time-window"],
+      "expect": {
+        "sources": ["sales"],
+        "reference": {
+          "source": "sales",
+          "sql": "SELECT p.category, ROUND(SUM(oi.quantity * oi.unit_price * (1 - oi.discount)), 2) AS revenue FROM order_items oi JOIN orders o ON o.order_id = oi.order_id JOIN products p ON p.product_id = oi.product_id WHERE o.status <> 'cancelled' AND o.order_date BETWEEN DATE '2025-01-01' AND DATE '2025-03-31' GROUP BY p.category ORDER BY p.category"
+        }
+      }
+    },
+    {
+      "id": "order-count-march",
+      "question": "How many orders were placed in March 2025?",
+      "tags": ["aggregation", "filter", "definition"],
+      "notes": "Order count excludes cancelled orders per ontology/orders.md. Without the context model an agent has no way to know that, which is exactly the point.",
+      "expect": {
+        "sources": ["sales"],
+        "match": "scalar",
+        "reference": {
+          "source": "sales",
+          "sql": "SELECT COUNT(DISTINCT order_id) AS orders FROM orders WHERE status <> 'cancelled' AND order_date BETWEEN DATE '2025-03-01' AND DATE '2025-03-31'"
+        }
+      }
+    },
+    {
+      "id": "top-5-products-revenue-h1",
+      "question": "What were the top 5 products by revenue in the first half of 2025? List them from highest to lowest with their revenue.",
+      "tags": ["ranking", "join", "aggregation"],
+      "expect": {
+        "sources": ["sales"],
+        "order_sensitive": true,
+        "reference": {
+          "source": "sales",
+          "sql": "SELECT p.name, ROUND(SUM(oi.quantity * oi.unit_price * (1 - oi.discount)), 2) AS revenue FROM order_items oi JOIN orders o ON o.order_id = oi.order_id JOIN products p ON p.product_id = oi.product_id WHERE o.status <> 'cancelled' AND o.order_date BETWEEN DATE '2025-01-01' AND DATE '2025-06-30' GROUP BY p.name ORDER BY revenue DESC LIMIT 5"
+        }
+      }
+    },
+    {
+      "id": "aov-by-segment-q2",
+      "question": "What was the average order value for each customer segment in Q2 2025 (1 April to 30 June)?",
+      "tags": ["ratio", "join", "definition"],
+      "notes": "AOV is gross revenue over distinct non-cancelled orders. Averaging the line-item total instead is the natural wrong answer.",
+      "expect": {
+        "sources": ["sales"],
+        "reference": {
+          "source": "sales",
+          "sql": "SELECT c.segment, ROUND(SUM(oi.quantity * oi.unit_price * (1 - oi.discount)) / COUNT(DISTINCT o.order_id), 2) AS aov FROM order_items oi JOIN orders o ON o.order_id = oi.order_id JOIN customers c ON c.customer_id = o.customer_id WHERE o.status <> 'cancelled' AND o.order_date BETWEEN DATE '2025-04-01' AND DATE '2025-06-30' GROUP BY c.segment ORDER BY c.segment"
+        }
+      }
+    },
+    {
+      "id": "net-revenue-may",
+      "question": "What was net revenue in May 2025?",
+      "tags": ["definition", "aggregation", "time-window"],
+      "notes": "Net = gross minus refunds issued in the same month, dated by refund_date. Attributing refunds to the refunded order's date is the trap.",
+      "expect": {
+        "sources": ["sales"],
+        "match": "scalar",
+        "tolerance": 0.05,
+        "reference": {
+          "source": "sales",
+          "sql": "SELECT ROUND((SELECT SUM(oi.quantity * oi.unit_price * (1 - oi.discount)) FROM order_items oi JOIN orders o ON o.order_id = oi.order_id WHERE o.status <> 'cancelled' AND o.order_date BETWEEN DATE '2025-05-01' AND DATE '2025-05-31') - COALESCE((SELECT SUM(r.amount) FROM refunds r WHERE r.refund_date BETWEEN DATE '2025-05-01' AND DATE '2025-05-31'), 0), 2) AS net_revenue"
+        }
+      }
+    },
+    {
+      "id": "refunds-by-reason-h1",
+      "question": "For the first half of 2025, how many refunds were issued for each reason and what was the total refunded amount for each?",
+      "tags": ["aggregation", "filter"],
+      "expect": {
+        "sources": ["sales"],
+        "reference": {
+          "source": "sales",
+          "sql": "SELECT reason, COUNT(*) AS refunds, ROUND(SUM(amount), 2) AS total_amount FROM refunds WHERE refund_date BETWEEN DATE '2025-01-01' AND DATE '2025-06-30' GROUP BY reason ORDER BY reason"
+        }
+      }
+    },
+    {
+      "id": "monthly-revenue-h1",
+      "question": "What was total revenue for each month of the first half of 2025? Give one figure per month in chronological order, January through June.",
+      "tags": ["aggregation", "time-window"],
+      "notes": "The reference projects revenue only. A month can be labelled '2025-03', '2025-03-01' or 'March' and all three are right; the chronological ordering carries the meaning instead.",
+      "expect": {
+        "sources": ["sales"],
+        "order_sensitive": true,
+        "reference": {
+          "source": "sales",
+          "sql": "SELECT ROUND(SUM(oi.quantity * oi.unit_price * (1 - oi.discount)), 2) AS revenue FROM order_items oi JOIN orders o ON o.order_id = oi.order_id WHERE o.status <> 'cancelled' AND o.order_date BETWEEN DATE '2025-01-01' AND DATE '2025-06-30' GROUP BY date_trunc('month', o.order_date) ORDER BY date_trunc('month', o.order_date)"
+        }
+      }
+    },
+    {
+      "id": "active-customers-june",
+      "question": "How many active customers did we have in June 2025?",
+      "tags": ["definition", "aggregation"],
+      "notes": "Active means at least one non-cancelled order in the period. Counting rows in customers is the wrong answer the schema alone invites.",
+      "expect": {
+        "sources": ["sales"],
+        "match": "scalar",
+        "reference": {
+          "source": "sales",
+          "sql": "SELECT COUNT(DISTINCT customer_id) AS active_customers FROM orders WHERE status <> 'cancelled' AND order_date BETWEEN DATE '2025-06-01' AND DATE '2025-06-30'"
+        }
+      }
+    },
+    {
+      "id": "revenue-by-country-q1",
+      "question": "Break down Q1 2025 revenue (1 January to 31 March) by the customer's registered country.",
+      "tags": ["aggregation", "join"],
+      "expect": {
+        "sources": ["sales"],
+        "reference": {
+          "source": "sales",
+          "sql": "SELECT c.country, ROUND(SUM(oi.quantity * oi.unit_price * (1 - oi.discount)), 2) AS revenue FROM order_items oi JOIN orders o ON o.order_id = oi.order_id JOIN customers c ON c.customer_id = o.customer_id WHERE o.status <> 'cancelled' AND o.order_date BETWEEN DATE '2025-01-01' AND DATE '2025-03-31' GROUP BY c.country ORDER BY c.country"
+        }
+      }
+    },
+    {
+      "id": "cancelled-share-h1",
+      "question": "What percentage of all orders placed in the first half of 2025 were cancelled? Give the answer as a percentage.",
+      "tags": ["ratio", "filter"],
+      "expect": {
+        "sources": ["sales"],
+        "match": "scalar",
+        "tolerance": 0.05,
+        "reference": {
+          "source": "sales",
+          "sql": "SELECT ROUND(100.0 * COUNT(*) FILTER (WHERE status = 'cancelled') / COUNT(*), 2) AS cancelled_pct FROM orders WHERE order_date BETWEEN DATE '2025-01-01' AND DATE '2025-06-30'"
+        }
+      }
+    },
+    {
+      "id": "enterprise-top-category-h1",
+      "question": "Which single product category generated the most revenue from Enterprise customers in the first half of 2025? Return just that category and its revenue.",
+      "tags": ["ranking", "join", "filter"],
+      "expect": {
+        "sources": ["sales"],
+        "reference": {
+          "source": "sales",
+          "sql": "SELECT p.category, ROUND(SUM(oi.quantity * oi.unit_price * (1 - oi.discount)), 2) AS revenue FROM order_items oi JOIN orders o ON o.order_id = oi.order_id JOIN products p ON p.product_id = oi.product_id JOIN customers c ON c.customer_id = o.customer_id WHERE c.segment = 'Enterprise' AND o.status <> 'cancelled' AND o.order_date BETWEEN DATE '2025-01-01' AND DATE '2025-06-30' GROUP BY p.category ORDER BY revenue DESC LIMIT 1"
+        }
+      }
+    },
+    {
+      "id": "total-discount-h1",
+      "question": "How much did we give away in discounts in total on non-cancelled orders in the first half of 2025?",
+      "tags": ["aggregation", "definition"],
+      "notes": "Discount given is quantity * unit_price * discount -- the difference between list value and charged value, which requires reading the discount column as a fraction.",
+      "expect": {
+        "sources": ["sales"],
+        "match": "scalar",
+        "tolerance": 0.05,
+        "reference": {
+          "source": "sales",
+          "sql": "SELECT ROUND(SUM(oi.quantity * oi.unit_price * oi.discount), 2) AS discount_given FROM order_items oi JOIN orders o ON o.order_id = oi.order_id WHERE o.status <> 'cancelled' AND o.order_date BETWEEN DATE '2025-01-01' AND DATE '2025-06-30'"
+        }
+      }
+    },
+    {
+      "id": "orders-and-revenue-by-channel-h1",
+      "question": "For each acquisition channel, how many non-cancelled orders did we take in the first half of 2025 and how much revenue did they generate?",
+      "tags": ["aggregation", "join", "routing"],
+      "expect": {
+        "sources": ["sales"],
+        "reference": {
+          "source": "sales",
+          "sql": "SELECT o.channel, COUNT(DISTINCT o.order_id) AS orders, ROUND(SUM(oi.quantity * oi.unit_price * (1 - oi.discount)), 2) AS revenue FROM orders o JOIN order_items oi ON oi.order_id = o.order_id WHERE o.status <> 'cancelled' AND o.order_date BETWEEN DATE '2025-01-01' AND DATE '2025-06-30' GROUP BY o.channel ORDER BY o.channel"
+        }
+      }
+    },
+    {
+      "id": "spend-by-channel-h1",
+      "question": "What did we spend on advertising per channel over the first half of 2025?",
+      "tags": ["aggregation", "routing"],
+      "notes": "Answerable from the events source alone. An agent that also queries sales has not routed, it has scanned.",
+      "expect": {
+        "sources": ["events"],
+        "reference": {
+          "source": "events",
+          "sql": "SELECT channel, ROUND(SUM(amount), 2) AS spend FROM marketing_spend WHERE spend_date BETWEEN DATE '2025-01-01' AND DATE '2025-06-30' GROUP BY channel ORDER BY channel",
+          "sql_clickhouse": "SELECT channel, round(sum(amount), 2) AS spend FROM marketing_spend WHERE spend_date >= toDate('2025-01-01') AND spend_date <= toDate('2025-06-30') GROUP BY channel ORDER BY channel"
+        }
+      }
+    },
+    {
+      "id": "page-views-by-device-q1",
+      "question": "How many page views did each device type get in Q1 2025 (1 January to 31 March)?",
+      "tags": ["aggregation", "routing", "time-window"],
+      "expect": {
+        "sources": ["events"],
+        "reference": {
+          "source": "events",
+          "sql": "SELECT device, COUNT(*) AS views FROM page_views WHERE event_time >= TIMESTAMP '2025-01-01 00:00:00' AND event_time < TIMESTAMP '2025-04-01 00:00:00' GROUP BY device ORDER BY device",
+          "sql_clickhouse": "SELECT device, count() AS views FROM page_views WHERE event_time >= toDateTime('2025-01-01 00:00:00') AND event_time < toDateTime('2025-04-01 00:00:00') GROUP BY device ORDER BY device"
+        }
+      }
+    },
+    {
+      "id": "mobile-share-q2",
+      "question": "What share of page views in Q2 2025 (1 April to 30 June) came from mobile devices? Give the answer as a percentage.",
+      "tags": ["ratio", "routing"],
+      "expect": {
+        "sources": ["events"],
+        "match": "scalar",
+        "tolerance": 0.05,
+        "reference": {
+          "source": "events",
+          "sql": "SELECT ROUND(100.0 * COUNT(*) FILTER (WHERE device = 'mobile') / COUNT(*), 2) AS mobile_pct FROM page_views WHERE event_time >= TIMESTAMP '2025-04-01 00:00:00' AND event_time < TIMESTAMP '2025-07-01 00:00:00'",
+          "sql_clickhouse": "SELECT round(100.0 * countIf(device = 'mobile') / count(), 2) AS mobile_pct FROM page_views WHERE event_time >= toDateTime('2025-04-01 00:00:00') AND event_time < toDateTime('2025-07-01 00:00:00')"
+        }
+      }
+    },
+    {
+      "id": "cost-per-order-by-channel-h1",
+      "question": "For each paid and organic channel, what did an order cost us in advertising in the first half of 2025? Divide that channel's total ad spend by its number of non-cancelled orders.",
+      "tags": ["multi-source", "ratio", "routing"],
+      "notes": "Spend and orders live in different warehouses and cannot be joined, so the only correct shape is two queries related outside SQL -- which is what the reference does too, in SQLite.",
+      "expect": {
+        "sources": ["sales", "events"],
+        "tolerance": 0.05,
+        "reference": [
+          {
+            "source": "sales",
+            "as": "orders_by_channel",
+            "sql": "SELECT channel, COUNT(DISTINCT order_id) AS orders FROM orders WHERE status <> 'cancelled' AND order_date BETWEEN DATE '2025-01-01' AND DATE '2025-06-30' GROUP BY channel"
+          },
+          {
+            "source": "events",
+            "as": "spend_by_channel",
+            "sql": "SELECT channel, SUM(amount) AS spend FROM marketing_spend WHERE spend_date BETWEEN DATE '2025-01-01' AND DATE '2025-06-30' GROUP BY channel",
+            "sql_clickhouse": "SELECT channel, sum(amount) AS spend FROM marketing_spend WHERE spend_date >= toDate('2025-01-01') AND spend_date <= toDate('2025-06-30') GROUP BY channel"
+          }
+        ],
+        "combine": "SELECT o.channel, ROUND(s.spend / o.orders, 2) AS cost_per_order FROM orders_by_channel o JOIN spend_by_channel s ON s.channel = o.channel ORDER BY o.channel"
+      }
+    },
+    {
+      "id": "roas-paid-search-q2",
+      "question": "What was the return on ad spend for the paid_search channel in Q2 2025 (1 April to 30 June)? That is, revenue from paid_search orders divided by paid_search advertising spend.",
+      "tags": ["multi-source", "ratio"],
+      "expect": {
+        "sources": ["sales", "events"],
+        "match": "scalar",
+        "tolerance": 0.05,
+        "reference": [
+          {
+            "source": "sales",
+            "as": "rev",
+            "sql": "SELECT SUM(oi.quantity * oi.unit_price * (1 - oi.discount)) AS revenue FROM order_items oi JOIN orders o ON o.order_id = oi.order_id WHERE o.channel = 'paid_search' AND o.status <> 'cancelled' AND o.order_date BETWEEN DATE '2025-04-01' AND DATE '2025-06-30'"
+          },
+          {
+            "source": "events",
+            "as": "spend",
+            "sql": "SELECT SUM(amount) AS spend FROM marketing_spend WHERE channel = 'paid_search' AND spend_date BETWEEN DATE '2025-04-01' AND DATE '2025-06-30'",
+            "sql_clickhouse": "SELECT sum(amount) AS spend FROM marketing_spend WHERE channel = 'paid_search' AND spend_date >= toDate('2025-04-01') AND spend_date <= toDate('2025-06-30')"
+          }
+        ],
+        "combine": "SELECT ROUND(rev.revenue / spend.spend, 2) AS roas FROM rev, spend"
+      }
+    },
+    {
+      "id": "most-viewed-product-h1",
+      "question": "Which product's page was viewed the most in the first half of 2025? Give the product's name and its view count. Product pages have the path /product/<product_id>.",
+      "tags": ["multi-source", "ranking", "routing"],
+      "notes": "The view count is in events and the product name is in sales; neither source can answer alone.",
+      "expect": {
+        "sources": ["sales", "events"],
+        "reference": [
+          {
+            "source": "events",
+            "as": "top_view",
+            "sql": "SELECT CAST(split_part(path, '/', 3) AS INTEGER) AS product_id, COUNT(*) AS views FROM page_views WHERE path LIKE '/product/%' AND event_time >= TIMESTAMP '2025-01-01 00:00:00' AND event_time < TIMESTAMP '2025-07-01 00:00:00' GROUP BY 1 ORDER BY views DESC, product_id LIMIT 1",
+            "sql_clickhouse": "SELECT toInt32(splitByChar('/', path)[3]) AS product_id, count() AS views FROM page_views WHERE path LIKE '/product/%' AND event_time >= toDateTime('2025-01-01 00:00:00') AND event_time < toDateTime('2025-07-01 00:00:00') GROUP BY product_id ORDER BY views DESC, product_id LIMIT 1"
+          },
+          {
+            "source": "sales",
+            "as": "products",
+            "sql": "SELECT product_id, name FROM products"
+          }
+        ],
+        "combine": "SELECT p.name, v.views FROM top_view v JOIN products p ON p.product_id = v.product_id"
+      }
+    },
+    {
+      "id": "mom-growth-h1",
+      "question": "What was the month-over-month revenue growth rate, as a percentage, for each month from February through June 2025? Give the five figures in chronological order.",
+      "tags": ["window-function", "ratio", "time-window"],
+      "expect": {
+        "sources": ["sales"],
+        "order_sensitive": true,
+        "tolerance": 0.05,
+        "reference": {
+          "source": "sales",
+          "sql": "WITH m AS (SELECT date_trunc('month', o.order_date) AS month, SUM(oi.quantity * oi.unit_price * (1 - oi.discount)) AS revenue FROM order_items oi JOIN orders o ON o.order_id = oi.order_id WHERE o.status <> 'cancelled' AND o.order_date BETWEEN DATE '2025-01-01' AND DATE '2025-06-30' GROUP BY 1), g AS (SELECT month, ROUND(100.0 * (revenue - LAG(revenue) OVER (ORDER BY month)) / LAG(revenue) OVER (ORDER BY month), 2) AS growth_pct FROM m) SELECT growth_pct FROM g WHERE growth_pct IS NOT NULL ORDER BY month"
+        }
+      }
+    }
+  ]
+}

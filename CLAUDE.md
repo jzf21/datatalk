@@ -105,6 +105,21 @@ Report generation is a **multi-agent pipeline** orchestrated by
 - `web/app.py` — streaming NDJSON endpoints. `web/deps.py` — request-scoped
   guards. `web/routes_auth.py`, `web/routes_orgs.py`.
 - `llm/prompts.py` — all system prompts.
+- `evals/` — **measured agent accuracy**, the one thing the scripted-fake test
+  suite cannot tell you. A deterministic fixture (fingerprinted; the seeder
+  refuses to run if it drifts, because every reference answer is a function of
+  those exact bytes) is seeded into two real warehouses, and the *production*
+  agents answer golden questions through their *production* prompts — a harness
+  that seeds its own prompt measures a prompt nobody ships. Scored by
+  **execution match** against a reference *query* executed at eval time, never a
+  pinned answer: many queries are correct, one answer is. Cross-source ground
+  truth is computed the way the product computes it — one reference step per
+  source, related in stdlib SQLite — not by a join the product could not write.
+  The default run is an A/B on the context model being loaded, which is what
+  turns "curated meaning beats more schema" into a number. CLI only
+  (`datatalk-eval`), never pytest: it spends real tokens. What pytest covers is
+  the scorer, which is the piece that can be wrong *silently* — a matcher that
+  is slightly too generous just reports a higher number. See `docs/evals.md`.
 - `observability.py` — **the only module that names Langfuse.** Agents call
   `obs.observe()` / `obs.start()` / `obs.agent_run()`, which degrade to a
   no-op span object when no `LANGFUSE_*` credentials are set — so there are no

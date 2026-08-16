@@ -35,6 +35,10 @@ dev = ["pytest>=8.0", "httpx>=0.27"]
 datatalk-check = "datatalk.scripts.check_connection:main"
 datatalk-db = "datatalk.scripts.db:main"
 datatalk-import-sqlite = "datatalk.scripts.import_sqlite:main"
+# Offline evaluation of the agents against a seeded fixture. Ships with the
+# package rather than living in a scripts/ directory so `datatalk-eval` works
+# from an install, which is what makes it runnable in CI.
+datatalk-eval = "datatalk.evals.cli:main"
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -42,6 +46,12 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["datatalk*"]
+
+[tool.setuptools.package-data]
+# The eval suite and its context model are data, not code, but they must travel
+# with the package: `datatalk-eval` resolves them relative to __file__, so a
+# wheel that omitted them would install a CLI with nothing to run.
+"datatalk.evals" = ["suites/*.json", "context/*.md", "context/*.json", "context/**/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
