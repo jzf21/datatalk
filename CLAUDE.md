@@ -2,8 +2,9 @@
 
 Schema-agnostic LLM report generation and Q&A over a workspace's data,
 **multi-tenant** and **multi-source**: users belong to orgs, and each org brings
-any number of named data sources, each a ClickHouse or Postgres warehouse. The
-agent sees them all and picks per query. Python 3.11+, FastAPI backend on
+any number of named data sources, each a ClickHouse or Postgres warehouse or a
+Jira Cloud site (synced into Postgres). The agent sees them all and picks per
+query. Python 3.11+, FastAPI backend on
 Postgres, Next.js frontend in `frontend/`.
 
 ## Commands
@@ -18,6 +19,8 @@ Postgres, Next.js frontend in `frontend/`.
 - Generate the context model: **Settings → Data context → Generate** in the UI
   (needs `OPENAI_DOCS_MODEL`, or it falls back to `OPENAI_MODEL`).
 - Import a legacy single-tenant DB: `datatalk-import-sqlite --help` (has `--dry-run`)
+- Refresh synced (Jira) sources: `datatalk-sync` (cron; `--full`, `--gc --dry-run`).
+  Needs `DATATALK_SYNC_DATABASE_URL` — see `docs/jira.md`.
 - Config comes from a local `.env` (see `.env.example`).
 
 > Use `localhost`, never `127.0.0.1`, for the API. The session cookie is
@@ -76,6 +79,13 @@ Report generation is a **multi-agent pipeline** orchestrated by
   address columns by name. Filter values are bound by the driver
   (`warehouse/binding.py`), never interpolated, so the executed SQL does not vary
   with user input at all.
+- `integrations/` — **synced sources (Jira).** A non-SQL system is copied into
+  the *sync store* — a separate Postgres DB, one schema + one read-only login
+  role per source (`syncstore.py`) — and is then an ordinary SQL source:
+  `warehouse/jira.py` is the Postgres adapter with a Jira `prompt_hint`, and a
+  `jira` row's spec (`auth/orgs._reach`) points at the store as that role. The
+  only code that calls Jira or writes to the store lives here; `service.py` is
+  the seam to `source_sync_state`. See `docs/jira.md`.
 - `warehouse/catalog.py` — schema discovery across *all* of an org's sources,
   introspected concurrently and cached per `(org_id, source fingerprint)`.
   `build_catalog()` renders column names only (it goes in every prompt);
@@ -179,6 +189,23 @@ Report generation is a **multi-agent pipeline** orchestrated by
   demoting the others and flushing first, or the index fires mid-transaction
   (`_set_default` in `web/routes_orgs.py`). Deleting the default promotes
   another, so an unqualified query always resolves.
+
+### Synced-source (Jira) rules
+- **The agent never holds the Jira token.** A `jira` row's `host`/`password`
+  are the site and API token, read only by the sync job; its `WarehouseSpec`
+  is the sync store as the source's own role. Never route a Jira credential
+  into a spec, a prompt, or a trace.
+- **Isolation is a grant, not a filter.** A source role can `SELECT` its own
+  schema and nothing else; `tests/test_jira_sync.py` proves it against a real
+  server. Do not widen `syncstore.provision`, and never point the sync store at
+  the app database (`DATATALK_SYNC_DATABASE_URL` has no fallback, by design).
+- **Only a full sync notices deletions**, and the cursor only advances when a
+  run completes. Changing site, account or scope resets it (`reset_cursor`).
+- **Table comments are prompt text.** `integrations/jira/schema.py` comments
+  reach the catalog via `col_description`; bump `SCHEMA_VERSION` with any DDL
+  change (a mismatch rebuilds and fully resyncs — the store is a cache).
+- **The Jira host is allowlisted** (`normalize_site`) and redirects are not
+  followed: the server makes authenticated calls to an admin-typed host.
 
 ### Live-dashboard rules
 - **A refresh never writes the snapshot back.** `analysis` is prose *about* the

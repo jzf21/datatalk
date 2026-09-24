@@ -4,6 +4,7 @@ import type { ConnectionPublic } from "@/lib/api/auth";
 import {
   DATA_SOURCES,
   getDataSource,
+  isSyncedSource,
   sourceTypeName,
   toConnectionInput,
 } from "@/lib/connections/sources";
@@ -12,6 +13,27 @@ describe("data sources", () => {
   it("resolves each engine the API can store", () => {
     expect(getDataSource("clickhouse")?.name).toBe("ClickHouse");
     expect(getDataSource("postgres")?.name).toBe("PostgreSQL");
+    expect(getDataSource("jira")?.name).toBe("Jira");
+  });
+
+  it("marks only Jira as synced", () => {
+    // Synced sources lose the scope picker and the TLS switch and gain Sync
+    // buttons; a live warehouse getting those would be very confusing.
+    expect(isSyncedSource("jira")).toBe(true);
+    expect(isSyncedSource("postgres")).toBe(false);
+    expect(isSyncedSource("clickhouse")).toBe(false);
+    expect(isSyncedSource("duckdb")).toBe(false);
+  });
+
+  it("asks Jira for an API token, and lets the scope be empty", () => {
+    const jira = getDataSource("jira")!;
+    const byId = Object.fromEntries(jira.fields.map((f) => [f.id, f]));
+    expect(byId.password.type).toBe("password");
+    expect(byId.password.label).toMatch(/token/i);
+    expect(byId.scope_query.optional).toBe(true);
+    // Port and database are fixed for Jira, not something to type.
+    expect(byId.port).toBeUndefined();
+    expect(byId.database).toBeUndefined();
   });
 
   it("returns null for an unknown or unpicked source", () => {
@@ -93,6 +115,26 @@ describe("data sources", () => {
     expect(input.introspect_tables).toEqual(["reporting.invoices"]);
     expect(input.sslmode).toBe("require");
     expect(input.host).toBe("h.test");
+  });
+
+  it("carries a Jira source's scope back unchanged", () => {
+    const stored = {
+      id: "j",
+      type: "jira",
+      name: "jira",
+      description: "",
+      is_default: false,
+      host: "acme.atlassian.net",
+      port: 443,
+      user: "bot@acme.com",
+      database: "jira",
+      secure: true,
+      has_password: true,
+      scope_query: "project = ABC",
+    } as ConnectionPublic;
+    const input = toConnectionInput(stored, { is_default: true });
+    expect(input.scope_query).toBe("project = ABC");
+    expect(input.password).toBeNull();
   });
 
   it("gives each engine its own connection defaults", () => {

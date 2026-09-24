@@ -200,7 +200,7 @@ def _scope_note(ref: "SourceRef", tables: list[Table]) -> str:
     shown = sorted({t.database for t in tables})
     if not shown:
         return ""
-    noun = "schema" if ref.type == "postgres" else "database"
+    noun = "schema" if ref.type in ("postgres", "jira") else "database"
     if len(shown) > 1:
         noun += "s"
     return (

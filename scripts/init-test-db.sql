@@ -13,3 +13,10 @@ CREATE DATABASE datatalk_test OWNER datatalk;
 -- developer.
 CREATE DATABASE datatalk_eval_sales OWNER datatalk;
 CREATE DATABASE datatalk_eval_events OWNER datatalk;
+
+-- The sync store: synced sources (Jira) live here, one schema and one
+-- read-only login role per source -- never in the app database. The test
+-- suite derives `datatalk_test_sync` from DATATALK_TEST_DATABASE_URL and
+-- creates it on demand, so only the dev store is created here. Existing
+-- volumes skip this file; create it by hand (see docs/jira.md).
+CREATE DATABASE datatalk_sync OWNER datatalk;

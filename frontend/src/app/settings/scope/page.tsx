@@ -11,6 +11,7 @@ import { useSession } from "@/components/auth/session-gate";
 import { ScopePicker } from "@/components/settings/scope-picker";
 import {
   getDataSource,
+  isSyncedSource,
   toConnectionInput,
   sourceTypeName,
 } from "@/lib/connections/sources";
@@ -52,7 +53,11 @@ export default function ScopePage() {
     enabled: orgId !== null,
     retry: false,
   });
-  const connections = data?.connections ?? [];
+  // A synced source (Jira) has no tables to pick: its scope is the JQL on its
+  // own form, and what it syncs is a fixed set of tables.
+  const connections = (data?.connections ?? []).filter(
+    (c) => !isSyncedSource(c.type),
+  );
 
   return (
     <>

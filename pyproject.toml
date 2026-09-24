@@ -24,6 +24,9 @@ dependencies = [
     # datatalk/observability.py -- but a hard dependency rather than an extra so
     # that `import datatalk.observability` cannot differ between environments.
     "langfuse>=4.14,<5",
+    # The Jira client (integrations/jira). Already required by the test suite
+    # via fastapi.testclient; now a runtime dependency in its own right.
+    "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
@@ -35,6 +38,8 @@ dev = ["pytest>=8.0", "httpx>=0.27"]
 datatalk-check = "datatalk.scripts.check_connection:main"
 datatalk-db = "datatalk.scripts.db:main"
 datatalk-import-sqlite = "datatalk.scripts.import_sqlite:main"
+# Refresh synced sources (Jira) -- run from cron; see docs/jira.md.
+datatalk-sync = "datatalk.scripts.sync:main"
 # Offline evaluation of the agents against a seeded fixture. Ships with the
 # package rather than living in a scripts/ directory so `datatalk-eval` works
 # from an install, which is what makes it runnable in CI.

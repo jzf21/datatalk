@@ -9,11 +9,16 @@ import { toast } from "sonner";
 import { PageBody, PageHeader } from "@/components/layout/page-header";
 import { useSession } from "@/components/auth/session-gate";
 import { SourcePicker } from "@/components/settings/source-picker";
+import { SyncControls } from "@/components/settings/sync-controls";
 import {
   SourceForm,
   type TestOutcome,
 } from "@/components/settings/source-form";
-import { getDataSource, type DataSource } from "@/lib/connections/sources";
+import {
+  getDataSource,
+  isSyncedSource,
+  type DataSource,
+} from "@/lib/connections/sources";
 import {
   createConnection,
   deleteConnection,
@@ -54,6 +59,9 @@ export default function ConnectionPage() {
   const [editing, setEditing] = useState<Editing>({ mode: "none" });
   const [result, setResult] = useState<TestOutcome | null>(null);
   const [busy, setBusy] = useState<"test" | "save" | null>(null);
+  // A synced source just added: its row starts the first sync on mount, so
+  // "Add source" leads straight to data rather than to an empty schema.
+  const [autoSyncId, setAutoSyncId] = useState<string | null>(null);
 
   const close = () => {
     setEditing({ mode: "none" });
@@ -78,9 +86,13 @@ export default function ConnectionPage() {
       const res = await testConnection(orgId, input);
       setResult({
         ok: res.ok,
-        message: res.ok
-          ? `Connected — ${res.table_count ?? "?"} tables in ${input.database}.`
-          : String(res.error ?? "Connection failed."),
+        message: !res.ok
+          ? String(res.error ?? "Connection failed.")
+          : isSyncedSource(input.type)
+            ? `Signed in as ${res.account || input.user} — about ${Number(
+                res.issue_count ?? 0,
+              ).toLocaleString()} issues in scope.`
+            : `Connected — ${res.table_count ?? "?"} tables in ${input.database}.`,
       });
     } catch (err) {
       setResult({
@@ -101,8 +113,9 @@ export default function ConnectionPage() {
         await updateConnection(orgId, editing.connection.id, input);
         toast.success(`Saved ${input.name}`);
       } else {
-        await createConnection(orgId, input);
+        const created = await createConnection(orgId, input);
         toast.success(`Added ${input.name}`);
+        if (isSyncedSource(input.type)) setAutoSyncId(created.id);
       }
       invalidate();
       close();
@@ -219,19 +232,40 @@ export default function ConnectionPage() {
                           {c.is_default && <Badge>Default</Badge>}
                         </div>
                         <p className="mt-0.5 truncate text-[12px] text-ink-tertiary">
-                          {c.user}@{c.host}:{c.port}/{c.database}
-                          {" · "}
-                          {scopeSummary(
-                            parseScope(
-                              c.introspect_databases as string[] | undefined,
-                              c.introspect_tables as string[] | undefined,
-                            ),
+                          {source?.synced ? (
+                            <>
+                              {c.user} @ {c.host}
+                              {" · "}
+                              <span className="font-mono">
+                                {c.scope_query || "all issues"}
+                              </span>
+                            </>
+                          ) : (
+                            <>
+                              {c.user}@{c.host}:{c.port}/{c.database}
+                              {" · "}
+                              {scopeSummary(
+                                parseScope(
+                                  c.introspect_databases as string[] | undefined,
+                                  c.introspect_tables as string[] | undefined,
+                                ),
+                              )}
+                            </>
                           )}
                         </p>
                         {c.description && (
                           <p className="mt-1 text-[12px] text-ink-secondary">
                             {c.description}
                           </p>
+                        )}
+                        {source?.synced && orgId && (
+                          <SyncControls
+                            orgId={orgId}
+                            connection={c}
+                            canEdit={canEdit}
+                            autoStart={autoSyncId === c.id}
+                            onSynced={invalidate}
+                          />
                         )}
                       </div>
                       {canEdit && source && (

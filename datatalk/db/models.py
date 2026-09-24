@@ -232,6 +232,9 @@ class OrgWarehouseConnection(Base):
     sql_default_limit: Mapped[int | None] = mapped_column(Integer)
     sql_max_rows: Mapped[int | None] = mapped_column(Integer)
     sql_timeout_seconds: Mapped[int | None] = mapped_column(Integer)
+    # Jira only: the JQL that scopes what is synced (``project in (ABC)``).
+    # NULL means every issue the account can see. Unused by the SQL engines.
+    scope_query: Mapped[str | None] = mapped_column(Text)
 
     created_at: Mapped[datetime] = _created_at()
     updated_at: Mapped[datetime] = mapped_column(
@@ -242,13 +245,22 @@ class OrgWarehouseConnection(Base):
     )
 
     org: Mapped[Org] = relationship(back_populates="connections")
+    # Present only for a synced source (Jira). Loaded eagerly: to_public_dict
+    # renders it, and a lazy load after the session closes would raise.
+    sync_state: Mapped["SourceSyncState | None"] = relationship(
+        back_populates="connection",
+        uselist=False,
+        lazy="selectin",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
     __table_args__ = (
         UniqueConstraint("org_id", "name", name="ux_whconn_org_name"),
         # A CHECK rather than a native ENUM, for the reason given on
         # ck_memberships_role above.
         CheckConstraint(
-            "type IN ('clickhouse','postgres')", name="ck_whconn_type"
+            "type IN ('clickhouse','postgres','jira')", name="ck_whconn_type"
         ),
         # At most one default per org, enforced by the database.
         Index(
@@ -284,7 +296,84 @@ class OrgWarehouseConnection(Base):
             "introspect_databases": list(self.introspect_databases or []),
             "introspect_tables": list(self.introspect_tables or []),
             "introspect_exclude_patterns": list(self.introspect_exclude_patterns or []),
+            "scope_query": self.scope_query,
+            "sync": self.sync_state.to_public_dict() if self.sync_state else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class SourceSyncState(Base):
+    """Where a synced source's data lives in the sync store, and how fresh it is.
+
+    One row per synced source (today: Jira). The source's data is not here -- it
+    is in its own schema of the *sync store*, a separate database, readable only
+    by a login role that can see nothing else. ``role_password`` is that role's
+    credential, which is what the agent connects with; the Jira API token on the
+    connection row never reaches a :class:`~datatalk.warehouse.WarehouseSpec`.
+
+    ``cursor`` is the ``updated`` watermark of the last *successful* sync. It
+    only moves at the end of a run, so a crash mid-sync re-reads rather than
+    skips.
+    """
+
+    __tablename__ = "source_sync_state"
+
+    connection_id: Mapped[UUID] = mapped_column(
+        _UUID_PK,
+        ForeignKey("org_warehouse_connections.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    org_id: Mapped[UUID] = mapped_column(
+        _UUID_PK, ForeignKey("orgs.id", ondelete="CASCADE"), nullable=False
+    )
+    schema_name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    role_name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    role_password: Mapped[str | None] = mapped_column(
+        "role_password_encrypted", EncryptedStr
+    )
+    cursor: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'never'")
+    )
+    last_error: Mapped[str | None] = mapped_column(Text)
+    stats: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+
+    connection: Mapped[OrgWarehouseConnection] = relationship(
+        back_populates="sync_state"
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "last_status IN ('never','running','ok','error')",
+            name="ck_syncstate_status",
+        ),
+        # These become identifiers in DDL, so the shape is enforced where no
+        # code path can skip it -- the same stance as ck_dcfile_path.
+        CheckConstraint(
+            r"schema_name ~ '^jira_[0-9a-f]{12}$'", name="ck_syncstate_schema"
+        ),
+        CheckConstraint(
+            r"role_name ~ '^dt_src_[0-9a-f]{12}$'", name="ck_syncstate_role"
+        ),
+    )
+
+    def __repr__(self) -> str:  # never render the role password
+        return (
+            f"<SourceSyncState conn={self.connection_id} schema={self.schema_name!r} "
+            f"status={self.last_status!r}>"
+        )
+
+    def to_public_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.last_status,
+            "last_synced_at": (
+                self.last_synced_at.isoformat() if self.last_synced_at else None
+            ),
+            "error": self.last_error,
+            "stats": dict(self.stats or {}),
         }
 
 

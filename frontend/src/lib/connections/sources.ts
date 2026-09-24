@@ -27,10 +27,13 @@ export interface DataSourceField {
     | "introspect_tables"
   >;
   label: string;
-  type?: "text" | "number" | "password" | "select";
+  type?: "text" | "number" | "password" | "select" | "textarea";
   options?: readonly string[];
   /** Shown under the input; the password hint is handled by the page. */
   hint?: string;
+  placeholder?: string;
+  /** May be left empty (the form otherwise waits for every field it shows). */
+  optional?: boolean;
 }
 
 export interface DataSource {
@@ -41,6 +44,12 @@ export interface DataSource {
   secureLabel: string;
   /** What `introspect_databases` scopes on this engine. */
   namespaceLabel: string;
+  /**
+   * Copied into the server's own store and refreshed by a sync, rather than
+   * queried live. A synced source has no scope picker (its scope is
+   * `scope_query`), no TLS switch, and a sync status with Sync buttons.
+   */
+  synced?: boolean;
   defaults: Omit<ConnectionInput, "type" | "name" | "description" | "is_default">;
 }
 
@@ -110,7 +119,53 @@ export const DATA_SOURCES: readonly DataSource[] = [
       sslmode: null,
     },
   },
+  {
+    id: "jira",
+    name: "Jira",
+    blurb:
+      "Jira Cloud issues, sprints, status history and worklogs — synced, not live.",
+    fields: [
+      {
+        id: "host",
+        label: "Site",
+        placeholder: "acme.atlassian.net",
+        hint: "Your Jira Cloud address. A pasted URL is fine.",
+      },
+      { id: "user", label: "Account email" },
+      {
+        id: "password",
+        label: "API token",
+        type: "password",
+        hint: "Create one at id.atlassian.com → Security → API tokens. The account needs read access to the projects.",
+      },
+      {
+        id: "scope_query",
+        label: "Scope (JQL)",
+        type: "textarea",
+        optional: true,
+        placeholder: "project in (ABC, DEF)",
+        hint: "Which issues to sync. Leave empty for everything this account can see.",
+      },
+    ],
+    secureLabel: "",
+    namespaceLabel: "Schemas",
+    synced: true,
+    defaults: {
+      host: "",
+      port: 443,
+      user: "",
+      password: "",
+      database: "jira",
+      secure: true,
+      scope_query: "",
+    },
+  },
 ];
+
+/** True for a source copied into the server by a sync (Jira). */
+export function isSyncedSource(type: string): boolean {
+  return Boolean(getDataSource(type)?.synced);
+}
 
 export function getDataSource(id: string | null): DataSource | null {
   if (id === null) return null;
@@ -148,6 +203,7 @@ export function toConnectionInput(
     sslmode: connection.sslmode ?? null,
     introspect_databases: connection.introspect_databases ?? [],
     introspect_tables: connection.introspect_tables ?? [],
+    scope_query: connection.scope_query ?? null,
     ...overrides,
   };
 }

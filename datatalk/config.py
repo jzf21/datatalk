@@ -141,6 +141,26 @@ class Settings(BaseSettings):
     # Auto-run `alembic upgrade head` on startup. Safe only single-process:
     # two workers racing `upgrade head` can corrupt alembic_version.
     db_auto_migrate: bool = Field(default=False, alias="DATATALK_DB_AUTO_MIGRATE")
+    # The sync store: a SEPARATE Postgres database holding synced sources (Jira),
+    # one schema and one read-only login role per source. Never the app DB --
+    # a grant mistake there could expose users and sessions. The role here must
+    # own the database and hold CREATEROLE. Empty = synced sources unavailable
+    # (409 sync_store_unconfigured), never a fallback to DATABASE_URL.
+    sync_database_url: str = Field(default="", alias="DATATALK_SYNC_DATABASE_URL")
+    # The server calls whatever Jira host an admin types, so it is allowlisted
+    # by suffix (SSRF). Comma-separated; each must start with a dot.
+    jira_allowed_host_suffixes: str = Field(
+        default=".atlassian.net", alias="DATATALK_JIRA_ALLOWED_HOST_SUFFIXES"
+    )
+
+    @property
+    def jira_allowed_host_suffix_list(self) -> list[str]:
+        return [
+            s.strip().lower()
+            for s in self.jira_allowed_host_suffixes.split(",")
+            if s.strip().startswith(".")
+        ]
+
     # Legacy SQLite path -- read only by `datatalk-import-sqlite`.
     datatalk_db_path: str = Field(default="datatalk.sqlite3", alias="DATATALK_DB_PATH")
 

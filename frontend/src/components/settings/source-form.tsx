@@ -19,7 +19,10 @@ export interface TestOutcome {
 /** `^[a-z][a-z0-9_]{0,39}$`, matching the API's validation exactly. */
 const NAME_RE = /^[a-z][a-z0-9_]{0,39}$/;
 
-function seed(source: DataSource, existing: ConnectionPublic | null): ConnectionInput {
+function seed(
+  source: DataSource,
+  existing: ConnectionPublic | null,
+): ConnectionInput {
   if (existing) {
     return {
       type: source.id,
@@ -39,6 +42,7 @@ function seed(source: DataSource, existing: ConnectionPublic | null): Connection
       // connections, so omitting these would silently clear the scope.
       introspect_databases: (existing.introspect_databases as string[]) ?? [],
       introspect_tables: (existing.introspect_tables as string[]) ?? [],
+      scope_query: existing.scope_query ?? "",
     };
   }
   return {
@@ -78,7 +82,9 @@ export function SourceForm({
   onTest: (input: ConnectionInput) => void;
   onSave: (input: ConnectionInput) => void;
 }) {
-  const [form, setForm] = useState<ConnectionInput>(() => seed(source, existing));
+  const [form, setForm] = useState<ConnectionInput>(() =>
+    seed(source, existing),
+  );
 
   const set = <K extends keyof ConnectionInput>(
     key: K,
@@ -86,7 +92,16 @@ export function SourceForm({
   ) => setForm((f) => ({ ...f, [key]: value }));
 
   const nameValid = NAME_RE.test(form.name);
-  const ready = canEdit && busy === null && Boolean(form.host) && nameValid;
+  // Every field the engine shows is required unless it says otherwise -- a
+  // Jira source without an account email fails at Jira, not here.
+  const missing = source.fields.find(
+    (f) =>
+      !f.optional &&
+      f.type !== "password" &&
+      f.type !== "select" &&
+      !String(form[f.id] ?? "").trim(),
+  );
+  const ready = canEdit && busy === null && !missing && nameValid;
 
   // A disabled Test/Save button is otherwise a dead end -- say what it's waiting
   // for so nobody has to guess which field is holding it back.
@@ -96,8 +111,8 @@ export function SourceForm({
       ? "Enter a source name to continue."
       : !nameValid
         ? "Source name must be lowercase letters, digits and underscores, starting with a letter."
-        : !form.host.trim()
-          ? "Enter a host to continue."
+        : missing
+          ? `Enter ${missing.label.toLowerCase()} to continue.`
           : null;
 
   const payload = (): ConnectionInput => ({
@@ -113,11 +128,26 @@ export function SourceForm({
         : f.hint;
 
     return (
-      <div key={f.id}>
+      <div
+        key={f.id}
+        className={f.type === "textarea" ? "sm:col-span-2" : undefined}
+      >
         <Label htmlFor={f.id} className="label-caps text-ink-secondary">
           {f.label}
         </Label>
-        {f.type === "select" ? (
+        {f.type === "textarea" ? (
+          <Textarea
+            id={f.id}
+            rows={2}
+            disabled={!canEdit}
+            value={String(form[f.id] ?? "")}
+            placeholder={f.placeholder}
+            onChange={(e) =>
+              set(f.id, e.target.value as ConnectionInput[typeof f.id])
+            }
+            className="mt-1.5 bg-muted font-mono text-[12px]"
+          />
+        ) : f.type === "select" ? (
           <select
             id={f.id}
             disabled={!canEdit}
@@ -142,6 +172,7 @@ export function SourceForm({
             id={f.id}
             type={f.type ?? "text"}
             disabled={!canEdit}
+            placeholder={f.placeholder}
             value={String(form[f.id] ?? "")}
             onChange={(e) =>
               set(
@@ -188,7 +219,10 @@ export function SourceForm({
               checked={form.is_default}
               onCheckedChange={(v) => set("is_default", v)}
             />
-            <Label htmlFor="is_default" className="text-[13px] text-ink-secondary">
+            <Label
+              htmlFor="is_default"
+              className="text-[13px] text-ink-secondary"
+            >
               Default source
             </Label>
           </div>
@@ -205,7 +239,11 @@ export function SourceForm({
           disabled={!canEdit}
           value={form.description}
           onChange={(e) => set("description", e.target.value)}
-          placeholder="Product events and sessions since 2023."
+          placeholder={
+            source.synced
+              ? "Leave empty for a sensible default, or name the teams and projects."
+              : "Product events and sessions since 2023."
+          }
           className="mt-1.5 bg-muted"
         />
         <p className="mt-1 text-[12px] text-ink-tertiary">
@@ -218,17 +256,19 @@ export function SourceForm({
         {source.fields.map(renderField)}
       </div>
 
-      <div className="flex items-center gap-2">
-        <Switch
-          id="secure"
-          disabled={!canEdit}
-          checked={form.secure}
-          onCheckedChange={(v) => set("secure", v)}
-        />
-        <Label htmlFor="secure" className="text-[13px] text-ink-secondary">
-          {source.secureLabel}
-        </Label>
-      </div>
+      {!source.synced && (
+        <div className="flex items-center gap-2">
+          <Switch
+            id="secure"
+            disabled={!canEdit}
+            checked={form.secure}
+            onCheckedChange={(v) => set("secure", v)}
+          />
+          <Label htmlFor="secure" className="text-[13px] text-ink-secondary">
+            {source.secureLabel}
+          </Label>
+        </div>
+      )}
 
       {result && (
         <p
