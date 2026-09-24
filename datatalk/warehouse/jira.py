@@ -21,13 +21,17 @@ from datatalk.warehouse.postgres import POSTGRES_DIALECT, PostgresWarehouse
 JIRA_DIALECT = replace(
     POSTGRES_DIALECT,
     name="jira",
-    prompt_hint=(
-        POSTGRES_DIALECT.prompt_hint
-        + " Jira sources are a synced PostgreSQL copy of Jira: issues (one row "
-        "per issue), status_changes (one row per status transition -- use it "
-        "for cycle time and throughput), sprints / issue_sprints, worklogs, "
-        "users and projects. Join on issue_key and account_id. Data is as fresh "
-        "as the last sync, not live."
+    # The model writes the SQL the label names. `[jira]` next to ClickHouse
+    # sources got ClickHouse-isms (multi-arg count(DISTINCT), bare UNION
+    # branches with LIMIT) aimed at a PostgreSQL database.
+    label="postgres, synced from Jira",
+    notes=(
+        "Sources marked [postgres, synced from Jira] are PostgreSQL databases: "
+        "write PostgreSQL there even when other sources are ClickHouse. Tables: "
+        "issues (one row per issue), status_changes (one row per status "
+        "transition -- use it for cycle time and throughput), sprints / "
+        "issue_sprints, worklogs, users and projects. Join on issue_key and "
+        "account_id. Data is as fresh as the last sync, not live."
     ),
 )
 

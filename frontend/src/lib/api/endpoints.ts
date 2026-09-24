@@ -8,7 +8,9 @@ import type {
   FilterConfigResponse,
   FilterDefInput,
   FilterValues,
+  FromTemplateResponse,
   HealthResponse,
+  ReportTemplateSummary,
   ReportDetail,
   ReportSummary,
   SchemaResponse,
@@ -52,6 +54,49 @@ export const listDashboards = () =>
 
 export const getDashboard = (id: number) =>
   apiGet<DashboardDetail>(`/api/dashboards/${id}`);
+
+/** Report templates this workspace's sources can run; [] without a Jira source. */
+export const listDashboardTemplates = () =>
+  apiGet<{ templates: ReportTemplateSummary[] }>("/api/dashboard-templates").then(
+    (r) => r.templates,
+  );
+
+/**
+ * Save an edited arrangement. The server validates every reference against
+ * the dashboard's captured datasets and strips any value, so this can move and
+ * restyle widgets but never change what a number is.
+ */
+export const saveDashboardLayout = (id: number, authoringDocument: unknown) =>
+  apiPut<{ authoring_document: unknown }>(`/api/dashboards/${id}/layout`, {
+    authoring_document: authoringDocument,
+  });
+
+export const addDashboardWidget = (id: number, widgetKey: string) =>
+  apiPost<{ dataset_id: string }>(`/api/dashboards/${id}/widgets`, {
+    widget_key: widgetKey,
+  });
+
+/** Generate one more widget with the agents; streams like streamDashboard. */
+export const streamAIWidget = (id: number, request: string, signal?: AbortSignal) =>
+  streamNdjson(`/api/dashboards/${id}/widgets/ai`, { request }, signal);
+
+/** Which dashboard filters reach one dataset, and any pinned selections. */
+export const setWidgetFilters = (
+  id: number,
+  datasetId: string,
+  body: { wired?: string[]; overrides: FilterValues },
+) =>
+  apiPut<{ supported: string[] }>(
+    `/api/dashboards/${id}/widgets/${encodeURIComponent(datasetId)}/filters`,
+    body,
+  );
+
+/** Build a dashboard from a template: its SQL, run once, no LLM. */
+export const createDashboardFromTemplate = (body: {
+  template_id: string;
+  source: string;
+  title?: string;
+}) => apiPost<FromTemplateResponse>("/api/dashboards/from-template", body);
 
 export const streamDashboard = (
   request: string,

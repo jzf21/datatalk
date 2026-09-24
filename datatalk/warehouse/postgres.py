@@ -66,7 +66,10 @@ POSTGRES_DIALECT = Dialect(
     param_style="pyformat",
     prompt_hint=(
         "PostgreSQL dialect: date_trunc('month', ts), now(), count(*), "
-        "count(DISTINCT x), etc. Qualify tables as schema.table."
+        "count(DISTINCT x), etc. Qualify tables as schema.table. "
+        "count(DISTINCT ...) takes ONE expression -- for several columns write "
+        "count(DISTINCT (a, b)). A UNION branch with its own ORDER BY or LIMIT "
+        "must be parenthesized: (SELECT ... LIMIT 5) UNION ALL (SELECT ...)."
     ),
 )
 

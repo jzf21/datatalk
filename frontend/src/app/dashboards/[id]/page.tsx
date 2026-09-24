@@ -2,7 +2,7 @@
 
 import { Suspense, use, useCallback, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { SlidersHorizontal } from "lucide-react";
+import { LayoutGrid, SlidersHorizontal } from "lucide-react";
 
 import { PageBody, PageHeader } from "@/components/layout/page-header";
 import { DocumentView } from "@/components/doc/block-renderer";
@@ -19,6 +19,7 @@ import {
 } from "@/lib/api/queries";
 import { FilterBar } from "@/components/dashboard/filter-bar";
 import { FilterConfigDialog } from "@/components/dashboard/filter-config-dialog";
+import { LayoutEditor } from "@/components/dashboard/layout-editor";
 import {
   decodeFilters,
   encodeFilters,
@@ -73,6 +74,9 @@ function DashboardInner({ id }: { id: string }) {
   const analyze = useAnalyzeDashboard(dashboardId);
   const [, setElapsed] = useState(0);
   const [configuring, setConfiguring] = useState(false);
+  // Bumped to re-open the editor on the stored dashboard after a server-side
+  // change (an added widget) that the editor's local model does not know about.
+  const [editing, setEditing] = useState<number | null>(null);
 
   const router = useRouter();
   const pathname = usePathname();
@@ -131,7 +135,8 @@ function DashboardInner({ id }: { id: string }) {
     !!fresh && fresh.datasets.length > 0 && fresh.datasets.every((d) => !d.ok);
   const document = fresh && !allFailed ? fresh.document : data.document;
   const queries = data.queries;
-  const rows = data.queries.reduce((sum, q) => sum + q.row_count, 0);
+  const isTemplate = "id" in (data.template ?? {});
+  const rows = data.queries.reduce((sum, q) => sum + (q.row_count ?? 0), 0);
   const isStale = !fresh;
 
   const freshness =
@@ -155,15 +160,30 @@ function DashboardInner({ id }: { id: string }) {
         meta={meta}
         actions={
           <>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setConfiguring(true)}
-              title="Choose which filters this dashboard has"
-            >
-              <SlidersHorizontal className="size-3.5" />
-              Filters
-            </Button>
+            {/* A template's filters come with its SQL; they are not
+                reconfigured by the model-driven rewrite this dialog runs. */}
+            {data.editable && editing === null && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setEditing(0)}
+                title="Move, resize and restyle widgets"
+              >
+                <LayoutGrid className="size-3.5" />
+                Edit layout
+              </Button>
+            )}
+            {!isTemplate && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setConfiguring(true)}
+                title="Choose which filters this dashboard has"
+              >
+                <SlidersHorizontal className="size-3.5" />
+                Filters
+              </Button>
+            )}
             <RefreshControls
               intervalMs={intervalMs}
               onIntervalChange={setIntervalMs}
@@ -207,7 +227,17 @@ function DashboardInner({ id }: { id: string }) {
           )}
           <RefreshStatus data={fresh} />
 
-          <DocumentView document={document} measure={false} />
+          {editing !== null ? (
+            <LayoutEditor
+              key={editing}
+              dashboard={data}
+              preview={document}
+              onClose={() => setEditing(null)}
+              onReload={() => setEditing((n) => (n ?? 0) + 1)}
+            />
+          ) : (
+            <DocumentView document={document} measure={false} />
+          )}
 
           {data.insights && (
             <InsightPanel

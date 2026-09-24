@@ -61,14 +61,22 @@ export function FilterConfigDialog({
   queries: CapturedQuery[];
 }) {
   const [drafts, setDrafts] = useState<FilterDefInput[]>(() =>
-    existing.map((d) => ({
-      id: d.id,
-      kind: d.kind,
-      label: d.label,
-      column: d.column,
-      source: d.source,
-      multi: d.multi ?? true,
-    })),
+    // Sprint filters exist only on report templates, which this dialog never
+    // opens for; the model-driven rewrite knows date ranges and dimensions.
+    existing.flatMap((d) =>
+      d.kind === "sprint"
+        ? []
+        : [
+            {
+              id: d.id,
+              kind: d.kind,
+              label: d.label,
+              column: d.column,
+              source: d.source,
+              multi: d.multi ?? true,
+            },
+          ],
+    ),
   );
   const update = useUpdateDashboardFilters(dashboardId);
 

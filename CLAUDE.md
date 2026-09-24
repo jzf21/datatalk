@@ -79,6 +79,15 @@ Report generation is a **multi-agent pipeline** orchestrated by
   address columns by name. Filter values are bound by the driver
   (`warehouse/binding.py`), never interpolated, so the executed SQL does not vary
   with user input at all.
+- `dashboards/templates/` — **report templates**: curated dashboards for sources
+  whose schema DataTalk owns (synced Jira). A template is *code* (filters,
+  widget SQL with `{{dt.*}}` placeholders, layout), checked at import by
+  `ReportTemplate.check()`. `instantiate.py` turns one into an ordinary saved
+  dashboard (`queries` + `filters.templates` + authoring document) and renders
+  it by calling `refresh_dashboard` itself, so there is still one rendering
+  path. `dashboards.template` (`{id, version, source}`) marks it; a template
+  dashboard **always binds**, defaults included, because its SQL has no
+  unparameterized form. `dashboards/layout.py` validates an edited layout.
 - `integrations/` — **synced sources (Jira).** A non-SQL system is copied into
   the *sync store* — a separate Postgres DB, one schema + one read-only login
   role per source (`syncstore.py`) — and is then an ordinary SQL source:
@@ -201,6 +210,10 @@ Report generation is a **multi-agent pipeline** orchestrated by
   the app database (`DATATALK_SYNC_DATABASE_URL` has no fallback, by design).
 - **Only a full sync notices deletions**, and the cursor only advances when a
   run completes. Changing site, account or scope resets it (`reset_cursor`).
+- **History is replayed, not snapshotted.** `sprint_events` and `field_changes`
+  come from the changelog; an issue created into a sprint gets a synthetic
+  `added` at its creation. Sprint/estimate reports read these, never
+  `issue_sprints` (current membership only).
 - **Table comments are prompt text.** `integrations/jira/schema.py` comments
   reach the catalog via `col_description`; bump `SCHEMA_VERSION` with any DDL
   change (a mismatch rebuilds and fully resyncs — the store is a cache).
@@ -230,6 +243,30 @@ Report generation is a **multi-agent pipeline** orchestrated by
 - **A filter reaches exactly the datasets it was wired to**, and the response
   names the ones it did not (`unfiltered`). A widget silently unaffected by a
   filter is the failure this design exists to avoid.
+
+### Report-template and layout rules
+- **Templates are code, not prompts.** Every widget of every template is
+  executed in `tests/test_jira_templates.py` with its defaults and with each
+  filter moved; the sprint numbers are checked against a hand-worked fixture.
+  A new template or widget belongs in that parametrization.
+- **No `CASE` in template SQL.** The read-only guardrail forbids `END` on
+  Postgres and cannot tell `CASE … END` from `END;`. Use `coalesce`, `FILTER`,
+  `greatest`, join tables, or first-row subqueries (see `jira/_sql.py`).
+- **Table names are unqualified.** The source role's `search_path` is its own
+  schema, so a template never learns a schema name. Point-in-time helpers use
+  `pit_*` aliases so they cannot shadow a caller's.
+- **Persisted SQL is a copy.** Fixing a template does not change dashboards
+  already built from it. Bump the template's `version`.
+- **A template's filters are fixed.** `PUT …/filters` (the LLM rewrite) 409s
+  `template_filters_fixed` on one. Per-widget wiring and overrides
+  (`templates[ds].filters` / `.overrides`) go through
+  `PUT …/widgets/{ds}/filters`, only for filters the SQL can bind, and are
+  coerced and allowlisted exactly like a viewer's selection.
+- **An edited layout carries no values.** `layout.sanitize` strips materialized
+  fields and validates every reference against the captured columns, so an
+  editor cannot type a number into a stat tile.
+- **A dataset without a template is reported `unfiltered`** when the dashboard
+  has filters: an AI widget added to a filtered dashboard says it ignores them.
 
 ### Context-model rules
 - **The tree is always on; bodies never are.** `ContextModel.render_tree()`

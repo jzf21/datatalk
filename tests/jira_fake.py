@@ -56,6 +56,7 @@ def make_issue(
     sprints: list[dict[str, Any]] | None = None,
     transitions: list[tuple[str, str, str, str]] = (),
     worklogs: list[tuple[int, str, str, int]] = (),
+    history: list[tuple[str, str, list[dict[str, Any]]]] = (),
     labels: list[str] = (),
     parent: tuple[str, str] | None = None,
     changelog_total: int | None = None,
@@ -64,8 +65,10 @@ def make_issue(
     """One issue in search-result shape.
 
     ``transitions`` are ``(when, from_id, to_id, author)``; ``worklogs`` are
-    ``(id, started, author, seconds)``. A ``*_total`` larger than the list
-    makes the inline list look truncated, forcing the follow-up fetch.
+    ``(id, started, author, seconds)``. ``history`` is extra changelog entries,
+    ``(when, author, items)`` -- build items with :func:`sprint_change`,
+    :func:`points_change`. A ``*_total`` larger than the list makes the inline
+    list look truncated, forcing the follow-up fetch.
     """
     names = {s["id"]: s["name"] for s in STATUSES}
     histories = [
@@ -80,6 +83,9 @@ def make_issue(
             ],
         }
         for n, (when, f, t, author) in enumerate(transitions)
+    ] + [
+        {"id": str(100 + n), "created": ts(when), "author": user(author), "items": items}
+        for n, (when, author, items) in enumerate(history)
     ]
     logs = [
         {"id": str(wid), "started": ts(started), "author": user(author),
@@ -120,6 +126,40 @@ def make_issue(
     }
 
 
+def sprint_change(before: list[int], after: list[int]) -> dict[str, Any]:
+    """A Sprint changelog item: ids as Jira writes them, ``"12, 13"``."""
+    return {
+        "field": "Sprint", "fieldtype": "custom", "fieldId": SPRINT,
+        "from": ", ".join(map(str, before)) or None,
+        "fromString": ", ".join(f"Sprint {i}" for i in before) or None,
+        "to": ", ".join(map(str, after)) or None,
+        "toString": ", ".join(f"Sprint {i}" for i in after) or None,
+    }
+
+
+def points_change(before: float | None, after: float | None) -> dict[str, Any]:
+    return {
+        "field": "Story point estimate", "fieldtype": "custom", "fieldId": STORY_POINTS,
+        "from": None, "fromString": None if before is None else str(before),
+        "to": None, "toString": None if after is None else str(after),
+    }
+
+
+def sprint(sid: int, state: str, start: str | None = None, end: str | None = None,
+           complete: str | None = None, board: int | None = None) -> dict[str, Any]:
+    """A sprint object as the sprint custom field carries it."""
+    out: dict[str, Any] = {"id": sid, "name": f"Sprint {sid}", "state": state}
+    if start:
+        out["startDate"] = ts(start)
+    if end:
+        out["endDate"] = ts(end)
+    if complete:
+        out["completeDate"] = ts(complete)
+    if board is not None:
+        out["boardId"] = board
+    return out
+
+
 class FakeJira:
     def __init__(self, issues: list[dict[str, Any]] | None = None, *, page_size: int = 2):
         self.issues = list(issues or [])
@@ -129,6 +169,12 @@ class FakeJira:
         self.extra_changelog: dict[str, list[dict[str, Any]]] = {}
         self.extra_worklogs: dict[str, list[dict[str, Any]]] = {}
         self.status_code_override: int | None = None
+        # The Agile API. None = the site has no Jira Software (404s).
+        self.boards: list[dict[str, Any]] | None = [
+            {"id": 1, "name": "ABC board", "type": "scrum", "location": {"projectKey": "ABC"}},
+        ]
+        self.board_sprints: dict[int, list[dict[str, Any]]] = {}
+        self.agile_status: int | None = None
 
     @property
     def transport(self) -> httpx.MockTransport:
@@ -165,6 +211,8 @@ class FakeJira:
             return httpx.Response(200, json={"count": len(self.issues)})
         if path == "/rest/api/3/search/jql":
             return self._search(request)
+        if path.startswith("/rest/agile/1.0/"):
+            return self._agile(request, path)
         m = re.match(r"^/rest/api/3/issue/(\d+)/(changelog|worklog)$", path)
         if m:
             iid, kind = m.groups()
@@ -176,6 +224,24 @@ class FakeJira:
                                              "total": len(items),
                                              "isLast": start + len(chunk) >= len(items)})
         return httpx.Response(404, json={"errorMessages": [f"no route {path}"]})
+
+    def _agile(self, request: httpx.Request, path: str) -> httpx.Response:
+        if self.agile_status:
+            return httpx.Response(self.agile_status, json={"errorMessages": ["no"]})
+        if self.boards is None:
+            return httpx.Response(404, json={"errorMessages": ["no Jira Software"]})
+        if path == "/rest/agile/1.0/board":
+            items = self.boards
+        else:
+            m = re.match(r"^/rest/agile/1.0/board/(\d+)/sprint$", path)
+            if not m:
+                return httpx.Response(404, json={"errorMessages": [f"no route {path}"]})
+            items = self.board_sprints.get(int(m.group(1)), [])
+        start = int(request.url.params.get("startAt", 0))
+        chunk = items[start:start + 1]
+        return httpx.Response(200, json={"values": chunk, "startAt": start,
+                                         "total": len(items),
+                                         "isLast": start + len(chunk) >= len(items)})
 
     def _search(self, request: httpx.Request) -> httpx.Response:
         jql = request.url.params["jql"]

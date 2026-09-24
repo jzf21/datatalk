@@ -14,7 +14,7 @@ migrated: it is a cache of Jira, and Jira is the source of truth.
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Order matters: children reference issues(id).
 TABLES: tuple[tuple[str, str], ...] = (
@@ -25,7 +25,8 @@ TABLES: tuple[tuple[str, str], ...] = (
             singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
             schema_version integer NOT NULL,
             site text NOT NULL,
-            synced_at timestamptz
+            synced_at timestamptz,
+            time_zone text
         )
         """,
     ),
@@ -95,6 +96,17 @@ TABLES: tuple[tuple[str, str], ...] = (
         """,
     ),
     (
+        "boards",
+        """
+        CREATE TABLE boards (
+            id bigint PRIMARY KEY,
+            name text,
+            board_type text,
+            project_key text
+        )
+        """,
+    ),
+    (
         "sprints",
         """
         CREATE TABLE sprints (
@@ -120,6 +132,33 @@ TABLES: tuple[tuple[str, str], ...] = (
         """,
     ),
     (
+        "sprint_events",
+        """
+        CREATE TABLE sprint_events (
+            issue_id bigint NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+            issue_key text NOT NULL,
+            sprint_id bigint NOT NULL,
+            changed_at timestamptz NOT NULL,
+            author_id text,
+            action text NOT NULL CHECK (action IN ('added', 'removed'))
+        )
+        """,
+    ),
+    (
+        "field_changes",
+        """
+        CREATE TABLE field_changes (
+            issue_id bigint NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+            issue_key text NOT NULL,
+            changed_at timestamptz NOT NULL,
+            author_id text,
+            field text NOT NULL,
+            from_value text,
+            to_value text
+        )
+        """,
+    ),
+    (
         "worklogs",
         """
         CREATE TABLE worklogs (
@@ -139,12 +178,22 @@ INDEXES: tuple[str, ...] = (
     "CREATE INDEX ON issues (resolved)",
     "CREATE INDEX ON status_changes (issue_id, changed_at)",
     "CREATE INDEX ON status_changes (changed_at)",
+    "CREATE INDEX ON sprint_events (sprint_id, changed_at)",
+    "CREATE INDEX ON sprint_events (issue_id)",
+    "CREATE INDEX ON field_changes (issue_id, field, changed_at)",
     "CREATE INDEX ON worklogs (issue_id)",
     "CREATE INDEX ON worklogs (started)",
 )
 
 TABLE_COMMENTS: dict[str, str] = {
-    "_sync_meta": "Sync bookkeeping. synced_at is when this copy of Jira was last refreshed.",
+    "_sync_meta": (
+        "Sync bookkeeping. synced_at is when this copy of Jira was last "
+        "refreshed; time_zone is the Jira site's zone, for bucketing by day."
+    ),
+    "boards": (
+        "Jira Software boards. Empty when the site has no Jira Software or the "
+        "account cannot see boards; sprints.board_id still links to it."
+    ),
     "projects": "Jira projects that have at least one synced issue.",
     "users": "Jira accounts seen as assignee, reporter or worklog/changelog author. No emails.",
     "issues": (
@@ -158,6 +207,16 @@ TABLE_COMMENTS: dict[str, str] = {
     "sprints": "Scrum sprints any synced issue has been in.",
     "issue_sprints": (
         "Issue-to-sprint membership. An issue carried over appears in several sprints."
+    ),
+    "sprint_events": (
+        "When an issue entered or left a sprint, from the changelog. An issue "
+        "created straight into a sprint gets an 'added' row at its created time. "
+        "Sprint scope at time T = issues whose latest event at or before T is "
+        "'added'. Use this, not issue_sprints, for burndown and scope change."
+    ),
+    "field_changes": (
+        "Changes to story_points, assignee, priority and issue_type, from the "
+        "changelog. Use it for the value a field had at a past time."
     ),
     "worklogs": "Time logged against issues.",
 }
@@ -186,7 +245,20 @@ COLUMN_COMMENTS: dict[str, dict[str, str]] = {
     },
     "sprints": {
         "state": "One of 'future', 'active', 'closed'.",
+        "board_id": "boards.id of the board the sprint belongs to.",
         "complete_date": "When the sprint was closed; NULL unless state = 'closed'.",
+    },
+    "sprint_events": {
+        "action": "'added' (issue entered the sprint) or 'removed' (it left).",
+        "author_id": "users.account_id of whoever made the change; NULL for creation.",
+    },
+    "field_changes": {
+        "field": "One of 'story_points', 'assignee', 'priority', 'issue_type'.",
+        "from_value": (
+            "Value before the change; NULL when unset. story_points values are "
+            "numeric text (cast with ::numeric); assignee values are account ids."
+        ),
+        "to_value": "Value after the change; NULL when cleared.",
     },
     "worklogs": {
         "started": "When the logged work started (not when it was logged).",

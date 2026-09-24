@@ -64,6 +64,18 @@ const DETAIL_MESSAGES: Record<string, string> = {
   filters_configuring: "Filters are already being set up for this dashboard.",
   filter_rewrite_failed:
     "None of this dashboard's queries could be rewritten to accept those filters.",
+  template_not_found: "That report template no longer exists.",
+  layout_invalid: "That layout refers to data this dashboard doesn't have.",
+  not_editable:
+    "This dashboard was saved before layouts could be edited. Regenerate it to edit.",
+  not_a_template: "Only dashboards built from a report template have a widget catalog.",
+  widget_not_found: "That widget isn't in this template's catalog.",
+  dataset_not_filterable: "This widget's query can't take dashboard filters.",
+  template_filters_fixed:
+    "A report template's filters are part of the template. Edit a widget's filters instead.",
+  source_not_found: "That data source isn't available in this workspace.",
+  source_needs_sync:
+    "This Jira source hasn't synced since DataTalk was upgraded. Run Sync now in Settings, then try again.",
 };
 
 export function apiErrorMessage(detail: string): string {

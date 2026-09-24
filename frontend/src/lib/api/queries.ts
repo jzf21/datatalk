@@ -20,6 +20,7 @@ export const qk = {
   report: (id: number) => ["report", id] as const,
   dashboards: ["dashboards"] as const,
   dashboard: (id: number) => ["dashboard", id] as const,
+  dashboardTemplates: ["dashboard-templates"] as const,
   // A separate root from `dashboard`, deliberately. Nested under it, the
   // useAnalyzeDashboard invalidation below would prefix-match and discard every
   // cached materialization -- re-running warehouse SQL because someone clicked
@@ -58,6 +59,25 @@ export function useReport(id: number | null) {
 
 export function useDashboards() {
   return useQuery({ queryKey: qk.dashboards, queryFn: api.listDashboards });
+}
+
+export function useDashboardTemplates() {
+  return useQuery({
+    queryKey: qk.dashboardTemplates,
+    queryFn: api.listDashboardTemplates,
+    // Changes only when a source is added or removed.
+    staleTime: 5 * 60_000,
+  });
+}
+
+export function useCreateDashboardFromTemplate() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.createDashboardFromTemplate,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.dashboards });
+    },
+  });
 }
 
 export function useDashboard(id: number | null) {
@@ -169,4 +189,38 @@ export function useAnalyzeDashboard(id: number) {
     // The analysis is persisted server-side, so the detail query is now stale.
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.dashboard(id) }),
   });
+}
+
+/**
+ * Every structural edit invalidates the same things: the stored dashboard, and
+ * every cached materialization -- those are answers laid out for a grid that no
+ * longer exists. Invalidated rather than removed, so the view on screen
+ * refetches in its new shape (keeping the old one visible meanwhile) and the
+ * other filter combinations refetch only if they are visited again.
+ */
+function useDashboardEdit<V>(id: number, fn: (vars: V) => Promise<unknown>) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: fn,
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: qk.dashboard(id) });
+      await qc.invalidateQueries({ queryKey: qk.dashboardDataAll(id) });
+    },
+  });
+}
+
+export function useSaveDashboardLayout(id: number) {
+  return useDashboardEdit(id, (doc: unknown) => api.saveDashboardLayout(id, doc));
+}
+
+export function useAddDashboardWidget(id: number) {
+  return useDashboardEdit(id, (widgetKey: string) => api.addDashboardWidget(id, widgetKey));
+}
+
+export function useSetWidgetFilters(id: number) {
+  return useDashboardEdit(
+    id,
+    (vars: { datasetId: string; wired?: string[]; overrides: FilterValues }) =>
+      api.setWidgetFilters(id, vars.datasetId, { wired: vars.wired, overrides: vars.overrides }),
+  );
 }

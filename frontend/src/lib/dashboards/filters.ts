@@ -8,7 +8,12 @@
  * function takes `now` rather than reading the clock, for the same reason.
  */
 
-import type { FilterDef, FilterValue, FilterValues } from "@/lib/api/types";
+import type {
+  FilterDef,
+  FilterValue,
+  FilterValues,
+  SprintMode,
+} from "@/lib/api/types";
 
 export interface DatePreset {
   id: string;
@@ -45,6 +50,56 @@ export function isDimensionValue(
   return !!v && ("all" in v || "values" in v);
 }
 
+export type SprintValue = { mode?: SprintMode; n?: number; ids?: string[] };
+
+export function isSprintValue(v: FilterValue | null | undefined): v is SprintValue {
+  return !!v && "mode" in v;
+}
+
+/** Mirrors filters.MAX_LAST_N_SPRINTS on the server. */
+export const MAX_LAST_N_SPRINTS = 26;
+const SPRINT_MODES = new Set<SprintMode>(["active", "last_n", "ids", "all"]);
+
+/**
+ * A sprint selection the server will accept, or null.
+ *
+ * The server re-checks all of this; normalizing here keeps a hand-edited URL
+ * from turning into a 400 and a blank dashboard.
+ */
+export function normalizeSprint(def: FilterDef, raw: FilterValue): SprintValue | null {
+  if (!isSprintValue(raw) || !raw.mode || !SPRINT_MODES.has(raw.mode)) return null;
+  const single = def.multi === false;
+  if (raw.mode === "all") return single ? null : { mode: "all" };
+  if (raw.mode === "active") return { mode: "active" };
+  if (raw.mode === "last_n") {
+    const n = Number.isInteger(raw.n) ? (raw.n as number) : NaN;
+    if (!(n >= 1 && n <= MAX_LAST_N_SPRINTS)) return null;
+    return { mode: "last_n", n: single ? 1 : n };
+  }
+  const allowed = new Set(def.options ?? []);
+  const ids = Array.from(new Set((raw.ids ?? []).filter((id) => allowed.has(id)))).sort();
+  if (!ids.length) return null;
+  return { mode: "ids", ids: single ? ids.slice(0, 1) : ids };
+}
+
+/** "Sprint 42", "Last 6 sprints", "Active sprint". */
+export function describeSprint(def: FilterDef, value: FilterValue | undefined): string {
+  if (!isSprintValue(value)) return "Active sprint";
+  switch (value.mode) {
+    case "all":
+      return "All sprints";
+    case "last_n":
+      return value.n === 1 ? "Last completed sprint" : `Last ${value.n} sprints`;
+    case "ids": {
+      const ids = value.ids ?? [];
+      if (ids.length === 1) return def.option_labels?.[ids[0]] ?? `Sprint ${ids[0]}`;
+      return `${ids.length} sprints`;
+    }
+    default:
+      return "Active sprint";
+  }
+}
+
 /**
  * Resolve a date filter to a concrete window, for labelling only.
  *
@@ -76,6 +131,8 @@ export function defaultValues(defs: FilterDef[]): FilterValues {
       out[def.id] = def.default;
     } else if (def.kind === "dimension") {
       out[def.id] = { all: true };
+    } else if (def.kind === "sprint") {
+      out[def.id] = { mode: "active" };
     }
   }
   return out;
@@ -114,6 +171,12 @@ export function normalizeValues(
       continue;
     }
 
+    if (def.kind === "sprint") {
+      const next = normalizeSprint(def, raw);
+      if (next) out[id] = next;
+      continue;
+    }
+
     if (!isDimensionValue(raw)) continue;
     if (raw.all) {
       // "All" is a flag, never the full option list: binding every option would
@@ -146,6 +209,9 @@ export function filterSignature(values: FilterValues): string {
       }
       if (isDateValue(v)) {
         return `${k}=${v.preset ?? ""}|${v.from ?? ""}|${v.to ?? ""}`;
+      }
+      if (isSprintValue(v)) {
+        return `${k}=${v.mode}|${v.n ?? ""}|${[...(v.ids ?? [])].sort().join(",")}`;
       }
       return `${k}=`;
     })
@@ -188,11 +254,26 @@ export function encodeFilters(
       } else if (v.preset) {
         params.set(def.id, v.preset);
       }
+    } else if (def.kind === "sprint" && isSprintValue(v)) {
+      params.set(def.id, encodeSprint(v));
     } else if (isDimensionValue(v) && v.values) {
       for (const one of v.values) params.append(`${DIM_PREFIX}${def.id}`, one);
     }
   }
   return params;
+}
+
+// Sprint ids are integers, so a comma list needs no second escaping layer.
+function encodeSprint(v: SprintValue): string {
+  if (v.mode === "last_n") return `last:${v.n}`;
+  if (v.mode === "ids") return `ids:${(v.ids ?? []).join(",")}`;
+  return v.mode ?? "active";
+}
+
+function decodeSprint(raw: string): SprintValue {
+  if (raw.startsWith("last:")) return { mode: "last_n", n: Number(raw.slice(5)) };
+  if (raw.startsWith("ids:")) return { mode: "ids", ids: raw.slice(4).split(",") };
+  return { mode: raw as SprintMode };
 }
 
 export function decodeFilters(
@@ -214,8 +295,36 @@ export function decodeFilters(
       }
       continue;
     }
+    if (def.kind === "sprint") {
+      const raw = params.get(def.id);
+      const decoded = raw ? decodeSprint(raw) : null;
+      // A value the server would reject keeps the default rather than
+      // erasing the filter: an unconstrained sprint report is not "the default".
+      if (decoded && normalizeSprint(def, decoded)) out[def.id] = decoded;
+      continue;
+    }
     const picked = params.getAll(`${DIM_PREFIX}${def.id}`);
     if (picked.length) out[def.id] = { values: picked };
   }
   return normalizeValues(defs, out);
+}
+
+// --- per-widget wiring ---------------------------------------------------------
+
+/**
+ * Filter ids a dataset's SQL template can bind (its params are named
+ * `p_<filter id>_<suffix>`). Mirrors `layout.dataset_filter_support` on the
+ * server, which refuses to wire anything outside this set.
+ */
+export function supportedFilters(
+  template: { params?: { name: string }[] } | undefined,
+): Set<string> {
+  const out = new Set<string>();
+  for (const p of template?.params ?? []) {
+    if (!p.name.startsWith("p_")) continue;
+    const rest = p.name.slice(2);
+    const cut = rest.lastIndexOf("_");
+    if (cut > 0) out.add(rest.slice(0, cut));
+  }
+  return out;
 }

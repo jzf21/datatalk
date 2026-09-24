@@ -72,10 +72,24 @@ Jira Cloud ──(REST, email + API token)──▶ datatalk-sync / "Sync now"
 |---|---|---|
 | `issues` | issue (current state) | counts, WIP, backlog by status category / assignee / label / epic, story points |
 | `status_changes` | status transition (from the changelog) | cycle time, lead time, throughput, time in status |
-| `sprints`, `issue_sprints` | sprint; issue×sprint | sprint scope, carry-over, velocity |
+| `sprints`, `issue_sprints` | sprint; issue×sprint (current membership) | which sprints an issue is in now |
+| `sprint_events` | issue entering or leaving a sprint | committed scope, scope added/removed, carry-over, burndown |
+| `field_changes` | change to story points, assignee, priority or type | the estimate (or owner) an issue had at a past time |
+| `boards` | Jira Software board | board filters; empty without Jira Software access |
 | `worklogs` | worklog | time logged by person / project / week |
 | `users`, `projects` | account; project | display names. **No email addresses are synced** |
-| `_sync_meta` | — | `synced_at`: when this copy was refreshed |
+| `_sync_meta` | — | `synced_at`: when this copy was refreshed; `time_zone`: the site's zone |
+
+**History is replayed, not stored as snapshots.** Jira keeps only an issue's current sprint list and
+estimate. The sync keeps the changelog items for them instead. An issue created straight into a sprint has
+no changelog item for it, so the sync records it as `added` at the issue's creation time. A sprint's scope at
+time T is then the issues whose latest `sprint_events` row at or before T is `added`. Their estimate then is
+the `to_value` of the last `story_points` change at or before T, else the `from_value` of the first change
+after T, else the current value.
+
+**Boards** come from the Agile API (`/rest/agile/1.0/board`). It exists only with Jira Software and answers
+only accounts with board access, so a 403/404 there is not a failed sync: `boards` stays empty,
+`stats.boards_available` is false, and sprints keep the `boardId` from the sprint field.
 
 Table and column comments explain what the data means. For example, `status_category` is always `To Do`,
 `In Progress` or `Done`, and `story_points` is NULL when unestimated. The Postgres adapter reads those
@@ -139,6 +153,19 @@ datatalk-sync --gc                      # ...dropped, with their roles
 
 Deleting a source drops its schema and role on a best-effort basis. If the store is unreachable at that
 moment the delete still succeeds, and `--gc` removes the leftovers later.
+
+## Report templates
+
+A Jira source unlocks five ready-made dashboards on **Dashboards → Or start from a Jira report**: Sprint
+report, Velocity, Flow metrics, Backlog & delivery, and People & effort. They are hand-written SQL
+(`datatalk/dashboards/templates/jira/`), not generated. Building one runs no LLM. It saves an ordinary
+dashboard, and that dashboard refreshes through the usual path. The definitions they use are written at the
+top of each module (for example, *committed* means in the sprint when it started, at its estimate then).
+
+Their controls are Jira-native: project, board, **sprint** (active, last N, or specific sprints), issue type,
+priority, assignee (including *Unassigned*), epic, label, component and fix version. Each widget is wired
+to the controls its query can express. **Edit layout** can unwire a control from one widget, or pin it to
+one value ("always Bugs"). The response's `unwired` map names widgets that ignore a control on purpose.
 
 ## Not in v1
 

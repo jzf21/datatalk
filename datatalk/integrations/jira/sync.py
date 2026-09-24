@@ -18,6 +18,7 @@ cursor where it was, so the next run re-reads rather than skips.
 
 from __future__ import annotations
 
+import math
 import re
 import time
 from collections.abc import Callable
@@ -33,7 +34,7 @@ from psycopg import sql as pgsql
 from datatalk.config import Settings
 from datatalk.integrations import syncstore
 from datatalk.integrations.jira import schema as jschema
-from datatalk.integrations.jira.client import JiraClient
+from datatalk.integrations.jira.client import JiraClient, JiraError
 
 # Re-read this much before the cursor. JQL dates have minute precision and are
 # evaluated in the *user's* timezone, so a small overlap absorbs both.
@@ -167,6 +168,8 @@ class PageRows:
     issues: list[tuple] = field(default_factory=list)
     status_changes: list[tuple] = field(default_factory=list)
     issue_sprints: list[tuple] = field(default_factory=list)
+    sprint_events: list[tuple] = field(default_factory=list)
+    field_changes: list[tuple] = field(default_factory=list)
     worklogs: dict[int, tuple] = field(default_factory=dict)
     max_updated: datetime | None = None
 
@@ -181,6 +184,99 @@ def _user(rows: PageRows, u: dict[str, Any] | None) -> str | None:
     aid = str(u["accountId"])
     rows.users[aid] = (aid, u.get("displayName"), u.get("active"), u.get("accountType"))
     return aid
+
+
+# Changelog fields kept in field_changes, by the id Jira reports them under.
+# Story points are added per site: their id is a discovered custom field.
+_TRACKED_FIELDS = {"assignee": "assignee", "priority": "priority", "issuetype": "issue_type"}
+
+
+def _sprint_ids(value: Any) -> set[int]:
+    """A Sprint changelog value, ``"12, 13"``, as ids. Junk is dropped."""
+    out: set[int] = set()
+    for part in str(value or "").split(","):
+        part = part.strip()
+        if part.isdigit():
+            out.add(int(part))
+    return out
+
+
+def _points_text(value: Any) -> str | None:
+    """A story-point changelog string, normalised so ``::numeric`` never fails."""
+    try:
+        number = float(str(value).strip()) if value not in (None, "") else None
+    except ValueError:
+        return None
+    return str(number) if number is not None and math.isfinite(number) else None
+
+
+def _history_rows(
+    rows: PageRows,
+    iid: int,
+    key: str,
+    created: datetime | None,
+    current_sprints: set[int],
+    histories: list[dict[str, Any]],
+    fmap: "FieldMap",
+    categories: dict[str, str],
+) -> None:
+    """Status transitions, sprint membership events and tracked field changes.
+
+    Sprint membership is reconstructed, not just copied: an issue created
+    straight into a sprint has no changelog item for it, so its membership at
+    creation is the ``from`` side of its first Sprint change -- or, if it never
+    changed, the sprints it is in now -- and that membership is recorded as
+    'added' at the issue's creation time.
+    """
+    ordered = sorted(
+        (h for h in histories if parse_ts(h.get("created")) is not None),
+        key=lambda h: (parse_ts(h.get("created")), str(h.get("id") or "")),
+    )
+    initial: set[int] | None = None
+    events: list[tuple] = []
+    for h in ordered:
+        at = parse_ts(h.get("created"))
+        author = _user(rows, h.get("author"))
+        for item in h.get("items") or []:
+            fid = item.get("fieldId") or item.get("field")
+            if fid == "status":
+                rows.status_changes.append(
+                    (
+                        iid,
+                        key,
+                        at,
+                        author,
+                        item.get("fromString"),
+                        item.get("toString"),
+                        categories.get(str(item.get("from"))),
+                        categories.get(str(item.get("to"))),
+                    )
+                )
+            elif (fmap.sprint and fid == fmap.sprint) or item.get("field") == "Sprint":
+                before, after = _sprint_ids(item.get("from")), _sprint_ids(item.get("to"))
+                if initial is None:
+                    initial = before
+                events += [(iid, key, sid, at, author, "added") for sid in sorted(after - before)]
+                events += [(iid, key, sid, at, author, "removed") for sid in sorted(before - after)]
+            elif fmap.story_points and fid == fmap.story_points:
+                rows.field_changes.append(
+                    (iid, key, at, author, "story_points",
+                     _points_text(item.get("fromString")), _points_text(item.get("toString")))
+                )
+            elif fid in _TRACKED_FIELDS:
+                # Assignee changes carry account ids in from/to; the others'
+                # meaningful value is the display string.
+                use_ids = fid == "assignee"
+                rows.field_changes.append(
+                    (iid, key, at, author, _TRACKED_FIELDS[fid],
+                     item.get("from") if use_ids else item.get("fromString"),
+                     item.get("to") if use_ids else item.get("toString"))
+                )
+    if initial is None:
+        initial = current_sprints
+    if created is not None:
+        rows.sprint_events += [(iid, key, sid, created, None, "added") for sid in sorted(initial)]
+    rows.sprint_events += events
 
 
 def parse_page(
@@ -245,10 +341,12 @@ def parse_page(
 
         # Sprints: the sprint custom field carries full sprint objects, so the
         # Agile API (and the board permissions it needs) is not required.
+        current_sprints: set[int] = set()
         for sp in (f.get(fmap.sprint) if fmap.sprint else None) or []:
             if not isinstance(sp, dict) or sp.get("id") is None:
                 continue
             sid = int(sp["id"])
+            current_sprints.add(sid)
             rows.sprints[sid] = (
                 sid,
                 sp.get("boardId"),
@@ -261,31 +359,12 @@ def parse_page(
             )
             rows.issue_sprints.append((iid, sid))
 
-        # Changelog -> status transitions.
+        # Changelog -> status transitions, sprint events, field changes.
         log = issue.get("changelog") or {}
         histories = list(log.get("histories") or [])
         if client is not None and int(log.get("total") or 0) > len(histories):
             histories = client.changelog(str(iid))
-        for h in histories:
-            at = parse_ts(h.get("created"))
-            if at is None:
-                continue
-            author = _user(rows, h.get("author"))
-            for item in h.get("items") or []:
-                if (item.get("fieldId") or item.get("field")) != "status":
-                    continue
-                rows.status_changes.append(
-                    (
-                        iid,
-                        key,
-                        at,
-                        author,
-                        item.get("fromString"),
-                        item.get("toString"),
-                        categories.get(str(item.get("from"))),
-                        categories.get(str(item.get("to"))),
-                    )
-                )
+        _history_rows(rows, iid, key, created, current_sprints, histories, fmap, categories)
 
         # Worklogs.
         wl = f.get("worklog") or {}
@@ -421,7 +500,9 @@ def write_page(conn: psycopg.Connection, schema: str, rows: PageRows) -> None:
             "parent_issue_type = EXCLUDED.parent_issue_type",
             rows.issues,
         )
-        for table in ("status_changes", "issue_sprints", "worklogs"):
+        for table in (
+            "status_changes", "issue_sprints", "sprint_events", "field_changes", "worklogs"
+        ):
             cur.execute(
                 pgsql.SQL("DELETE FROM {} WHERE issue_id = ANY(%s)").format(
                     pgsql.Identifier(table)
@@ -441,6 +522,18 @@ def write_page(conn: psycopg.Connection, schema: str, rows: PageRows) -> None:
                 "ON CONFLICT DO NOTHING",
                 rows.issue_sprints,
             )
+        if rows.sprint_events:
+            cur.executemany(
+                "INSERT INTO sprint_events (issue_id, issue_key, sprint_id, changed_at, "
+                "author_id, action) VALUES (%s,%s,%s,%s,%s,%s)",
+                rows.sprint_events,
+            )
+        if rows.field_changes:
+            cur.executemany(
+                "INSERT INTO field_changes (issue_id, issue_key, changed_at, author_id, "
+                "field, from_value, to_value) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                rows.field_changes,
+            )
         if rows.worklogs:
             cur.executemany(
                 "INSERT INTO worklogs (id, issue_id, issue_key, author_id, started, "
@@ -450,6 +543,60 @@ def write_page(conn: psycopg.Connection, schema: str, rows: PageRows) -> None:
                 "started = EXCLUDED.started, "
                 "time_spent_seconds = EXCLUDED.time_spent_seconds",
                 list(rows.worklogs.values()),
+            )
+
+
+def fetch_boards(client: JiraClient) -> tuple[list[tuple], dict[int, int]] | None:
+    """Boards, and ``sprint id -> board id`` for scrum boards. None = unavailable.
+
+    Best effort by design: the Agile API exists only with Jira Software and
+    answers only accounts with board access. Without it the sync still
+    produces every other table, and sprints keep whatever ``boardId`` the
+    sprint field carried.
+    """
+    try:
+        boards = client.boards()
+    except JiraError:
+        return None
+    rows: list[tuple] = []
+    sprint_boards: dict[int, int] = {}
+    for b in boards:
+        if b.get("id") is None:
+            continue
+        bid = int(b["id"])
+        rows.append(
+            (bid, b.get("name"), b.get("type"), (b.get("location") or {}).get("projectKey"))
+        )
+        if b.get("type") != "scrum":
+            continue  # kanban boards have no sprints, and 400 when asked
+        try:
+            for sp in client.board_sprints(bid):
+                if sp.get("id") is not None:
+                    # A sprint shows on every board that shares its filter;
+                    # its own originBoardId is the one it belongs to.
+                    sprint_boards[int(sp["id"])] = int(sp.get("originBoardId") or bid)
+        except JiraError:
+            continue
+    return rows, sprint_boards
+
+
+def write_boards(
+    conn: psycopg.Connection, schema: str, boards: list[tuple], sprint_boards: dict[int, int]
+) -> None:
+    """Replace the boards table and fill in sprints that lacked a board."""
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(pgsql.SQL("SET LOCAL search_path = {}").format(pgsql.Identifier(schema)))
+        cur.execute("DELETE FROM boards")
+        if boards:
+            cur.executemany(
+                "INSERT INTO boards (id, name, board_type, project_key) "
+                "VALUES (%s,%s,%s,%s) ON CONFLICT (id) DO NOTHING",
+                boards,
+            )
+        if sprint_boards:
+            cur.executemany(
+                "UPDATE sprints SET board_id = %s WHERE id = %s AND board_id IS NULL",
+                [(bid, sid) for sid, bid in sprint_boards.items()],
             )
 
 
@@ -532,9 +679,11 @@ def run_sync(
                     "DELETE FROM projects p WHERE NOT EXISTS "
                     "(SELECT 1 FROM issues i WHERE i.project_key = p.key)"
                 )
+                # A sprint an issue has left is still history (scope change).
                 conn.execute(
                     "DELETE FROM sprints s WHERE NOT EXISTS "
-                    "(SELECT 1 FROM issue_sprints x WHERE x.sprint_id = s.id)"
+                    "(SELECT 1 FROM issue_sprints x WHERE x.sprint_id = s.id) "
+                    "AND NOT EXISTS (SELECT 1 FROM sprint_events e WHERE e.sprint_id = s.id)"
                 )
                 conn.execute(
                     "DELETE FROM users u WHERE NOT EXISTS (SELECT 1 FROM issues i "
@@ -542,19 +691,31 @@ def run_sync(
                     "AND NOT EXISTS (SELECT 1 FROM status_changes c "
                     "WHERE c.author_id = u.account_id) "
                     "AND NOT EXISTS (SELECT 1 FROM worklogs w "
-                    "WHERE w.author_id = u.account_id)"
+                    "WHERE w.author_id = u.account_id) "
+                    "AND NOT EXISTS (SELECT 1 FROM sprint_events e "
+                    "WHERE e.author_id = u.account_id) "
+                    "AND NOT EXISTS (SELECT 1 FROM field_changes f "
+                    "WHERE u.account_id IN (f.author_id, f.from_value, f.to_value))"
                 )
+        # After the issues, so a board can claim sprints the pages inserted.
+        boards = fetch_boards(client)
+        if boards is not None:
+            write_boards(conn, cfg.schema, *boards)
+        else:
+            emit("warning", {"message": "Boards unavailable (no Jira Software access)."})
+
         with conn.transaction():
             conn.execute(
-                pgsql.SQL("UPDATE {} SET synced_at = now(), site = %s").format(
-                    pgsql.Identifier(cfg.schema, "_sync_meta")
-                ),
-                (cfg.site,),
+                pgsql.SQL(
+                    "UPDATE {} SET synced_at = now(), site = %s, time_zone = %s"
+                ).format(pgsql.Identifier(cfg.schema, "_sync_meta")),
+                (cfg.site, me.get("timeZone") or "UTC"),
             )
         stats = {
             "full": full,
             "issues_synced": synced,
             "issues_deleted": deleted,
+            "boards_available": boards is not None,
             "seconds": round(time.monotonic() - started, 1),
             "tables": _counts(conn, cfg.schema),
         }

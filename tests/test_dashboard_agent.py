@@ -509,3 +509,49 @@ def test_the_insight_findings_land_on_the_result_for_persistence(monkeypatch):
     assert result.insights["insights"] == findings
     assert result.insights["lead"] == ["q1"]
     assert result.insights["gaps"] == ["No cost data"]
+
+
+# --- one widget ----------------------------------------------------------------
+
+
+def test_a_widget_is_renumbered_past_the_dashboards_datasets(monkeypatch):
+    widget_json = json.dumps({"blocks": [
+        {"type": "heading", "text": "Revenue"},            # prose: dropped
+        {"type": "row", "children": [
+            {"type": "chart", "chart_type": "bar", "title": "By metric",
+             "dataset_id": "q2", "x_col": "metric", "series_cols": ["current"]},
+        ]},
+    ]})
+    scripted = [
+        # One Analyst turn with a reconnaissance query (q1) and the real one (q2).
+        _response(_message(tool_calls=[_fn_call("c1", "SELECT 1 AS metric, 2 AS current"),
+                                       _fn_call("c2", "SELECT metric, current FROM t")])),
+        _response(_message(content="Data gathering complete.")),
+        _response(_message(content=widget_json)),
+    ]
+    ctx = make_ctx(openai=FakeOpenAI(scripted))
+    _stub_catalog(monkeypatch)
+    _stub_one_dataset(monkeypatch)
+
+    result = dashboard_mod.generate_widget(
+        "revenue by metric", ctx=ctx, taken_ids={"q1", "q2", "q7"})
+
+    # Only the query a block reads is kept, renumbered past the highest taken id.
+    assert [q["dataset_id"] for q in result.queries] == ["q8"]
+    assert result.queries[0]["sql"] == "SELECT metric, current FROM t"
+    assert [(b["type"], b["dataset_id"]) for b in result.blocks] == [("chart", "q8")]
+    # No planner and no insight pass: Analyst x2 + author.
+    assert ctx.openai.chat.completions.calls == 3
+    # The author was told this is one widget, not a page.
+    author_user = ctx.openai.chat.completions.kwargs[-1]["messages"][1]["content"]
+    assert "Build only the widget" in author_user
+
+
+def test_a_widget_with_no_data_explains_itself(monkeypatch):
+    scripted = [_response(_message(content="Data gathering complete."))]
+    ctx = make_ctx(openai=FakeOpenAI(scripted))
+    _stub_catalog(monkeypatch)
+    result = dashboard_mod.generate_widget("anything", ctx=ctx, taken_ids=set())
+    assert result.blocks == [] and result.queries == []
+    assert "No data was captured" in result.reason
+    assert ctx.openai.chat.completions.calls == 1

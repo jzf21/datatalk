@@ -459,3 +459,118 @@ def _generate_dashboard(
         insights=insight.raw,
         authoring_document=authoring,
     )
+
+
+# --- one widget on an existing dashboard ---------------------------------------
+
+WIDGET_DEADLINE_S = 120.0
+
+# Appended to the request the author sees: DASHBOARD_SYSTEM is written for a
+# whole grid, and without this a one-widget ask comes back as a page.
+_WIDGET_SCOPE = (
+    "\n\n(Build only the widget or widgets this asks for, as one row: no "
+    "headings, no summary text, no KPI strip unless it was asked for.)"
+)
+
+
+@dataclass
+class WidgetResult:
+    """Blocks and queries to append to a dashboard, ids already renumbered."""
+
+    queries: list[dict[str, Any]]
+    blocks: list[dict[str, Any]]
+    reason: str = ""  # why nothing was produced, when blocks is empty
+
+
+def _renumber(value: Any, mapping: dict[str, str]) -> Any:
+    if isinstance(value, dict):
+        out = {k: _renumber(v, mapping) for k, v in value.items()}
+        if isinstance(out.get("dataset_id"), str):
+            out["dataset_id"] = mapping.get(out["dataset_id"], out["dataset_id"])
+        return out
+    if isinstance(value, list):
+        return [_renumber(v, mapping) for v in value]
+    return value
+
+
+def _data_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The blocks that show data, rows flattened; prose and headings dropped."""
+    out: list[dict[str, Any]] = []
+    for b in blocks:
+        if b.get("type") == "row":
+            out.extend(_data_blocks(b.get("children") or []))
+        elif b.get("dataset_id"):
+            out.append(b)
+    return out
+
+
+def generate_widget(
+    request: str,
+    *,
+    ctx: "TenantContext",
+    taken_ids: set[str],
+    on_event: EventFn | None = None,
+    max_steps: int = 8,
+) -> WidgetResult:
+    """Analyst -> author for one widget, renumbered to not collide with ``taken_ids``.
+
+    The same agents and prompts as a full dashboard, with a one-section plan and
+    no planner or insight pass: the ask is already a single widget. Only queries
+    a block references are kept, so the Analyst's reconnaissance does not become
+    a query every refresh re-runs.
+    """
+    with obs.agent_run(
+        "generate-widget", ctx, feature="dashboard_widget", input={"request": request}
+    ) as root:
+        schema_context = build_catalog(ctx)
+        sections = [Section(id="widget", title=request[:60] or "Widget", goal=request,
+                            data_questions=[request])]
+        loop = analyst_mod.gather_data(
+            request,
+            sections,
+            ctx=ctx,
+            schema_context=schema_context,
+            system_prompt=DASHBOARD_ANALYST_SYSTEM,
+            plan_label="Widget plan (produce one clean dataset for this widget)",
+            on_event=on_event,
+            max_steps=max_steps,
+            deadline_s=WIDGET_DEADLINE_S,
+        )
+        if not loop.datasets:
+            reason = "No data was captured for that widget; the queries failed or returned nothing."
+            root.update(level="WARNING", status_message=reason)
+            return WidgetResult(queries=[], blocks=[], reason=reason)
+
+        authoring, _, _ = author_dashboard(
+            request + _WIDGET_SCOPE,
+            sections,
+            loop.datasets,
+            ctx=ctx,
+            sources=loop.dataset_sources,
+            analyst_notes=loop.final_content,
+            queries=loop.queries,
+            on_event=on_event,
+        )
+        # Keep only blocks that will materialize; a dangling reference would
+        # land on the dashboard as a permanent "unavailable" note.
+        blocks = [
+            b for b in _data_blocks(authoring.to_dict()["blocks"])
+            if not validate_references(Document.from_dict({"blocks": [b]}), loop.datasets)
+        ]
+        if not blocks:
+            reason = "The author did not produce a usable widget from the captured data."
+            root.update(level="WARNING", status_message=reason)
+            return WidgetResult(queries=[], blocks=[], reason=reason)
+
+        used = {b["dataset_id"] for b in blocks}
+        mapping: dict[str, str] = {}
+        n = max((int(t[1:]) for t in taken_ids if t[1:].isdigit()), default=0)
+        for q in loop.queries:
+            ds = q.get("dataset_id")
+            if ds in used and ds not in mapping:
+                n += 1
+                mapping[ds] = f"q{n}"
+        queries = [_renumber(q, mapping) for q in loop.queries if q.get("dataset_id") in mapping]
+        blocks = [_renumber(b, mapping) for b in blocks]
+        root.update(output={"blocks": len(blocks), "queries": len(queries)})
+        return WidgetResult(queries=queries, blocks=blocks)

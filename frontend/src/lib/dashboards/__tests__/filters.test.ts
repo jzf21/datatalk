@@ -5,11 +5,13 @@ import {
   DATE_PRESETS,
   decodeFilters,
   defaultValues,
+  describeSprint,
   encodeFilters,
   filterSignature,
   isDefault,
   normalizeValues,
   resolveRange,
+  supportedFilters,
 } from "../filters";
 
 // 2026-08-15T00:00:00Z -- fixed, so nothing here reads the clock.
@@ -177,5 +179,75 @@ describe("URL round trip", () => {
 describe("isDefault", () => {
   it("is false once a real selection is made", () => {
     expect(isDefault(DEFS, { region: { values: ["EMEA"] } })).toBe(false);
+  });
+});
+
+describe("sprint filters", () => {
+  const SPRINT: FilterDef = {
+    id: "sprint",
+    kind: "sprint",
+    label: "Sprints",
+    multi: true,
+    options: ["41", "42", "43"],
+    option_labels: { "42": "Sprint 42" },
+    default: { mode: "last_n", n: 6 },
+  };
+  const ONE: FilterDef = { ...SPRINT, id: "one", multi: false, default: { mode: "active" } };
+
+  it("round-trips every mode through the URL", () => {
+    for (const value of [
+      { mode: "active" as const },
+      { mode: "all" as const },
+      { mode: "last_n" as const, n: 3 },
+      { mode: "ids" as const, ids: ["41", "43"] },
+    ]) {
+      const params = encodeFilters([SPRINT], { sprint: value });
+      expect(decodeFilters([SPRINT], params)).toEqual({ sprint: value });
+    }
+  });
+
+  it("keeps the default out of the URL", () => {
+    expect(encodeFilters([SPRINT], { sprint: { mode: "last_n", n: 6 } }).toString()).toBe("");
+    expect(isDefault([SPRINT], { sprint: { mode: "last_n", n: 6 } })).toBe(true);
+  });
+
+  it("drops what the server would reject, falling back to the default", () => {
+    for (const raw of ["bogus", "last:0", "last:99", "last:x", "ids:", "ids:999"]) {
+      const params = new URLSearchParams({ sprint: raw });
+      expect(decodeFilters([SPRINT], params)).toEqual({ sprint: { mode: "last_n", n: 6 } });
+    }
+  });
+
+  it("holds a single-sprint filter to one sprint", () => {
+    expect(normalizeValues([ONE], { one: { mode: "ids", ids: ["43", "41"] } })).toEqual({
+      one: { mode: "ids", ids: ["41"] },
+    });
+    expect(normalizeValues([ONE], { one: { mode: "last_n", n: 6 } })).toEqual({
+      one: { mode: "last_n", n: 1 },
+    });
+    expect(normalizeValues([ONE], { one: { mode: "all" } })).toEqual({});
+  });
+
+  it("gives distinct selections distinct cache keys", () => {
+    const a = filterSignature({ sprint: { mode: "ids", ids: ["41"] } });
+    const b = filterSignature({ sprint: { mode: "ids", ids: ["42"] } });
+    const c = filterSignature({ sprint: { mode: "last_n", n: 41 } });
+    expect(new Set([a, b, c]).size).toBe(3);
+  });
+
+  it("describes a selection with the sprint's own name", () => {
+    expect(describeSprint(SPRINT, { mode: "ids", ids: ["42"] })).toBe("Sprint 42");
+    expect(describeSprint(SPRINT, { mode: "last_n", n: 1 })).toBe("Last completed sprint");
+    expect(describeSprint(SPRINT, { mode: "ids", ids: ["41", "42"] })).toBe("2 sprints");
+  });
+});
+
+describe("supportedFilters", () => {
+  it("reads filter ids from parameter names, underscores included", () => {
+    const params = ["p_issue_type_all", "p_issue_type_values", "p_period_from", "p_sprint_n", "limit"];
+    expect(supportedFilters({ params: params.map((name) => ({ name })) })).toEqual(
+      new Set(["issue_type", "period", "sprint"]),
+    );
+    expect(supportedFilters(undefined).size).toBe(0);
   });
 });

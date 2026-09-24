@@ -511,6 +511,12 @@ class Dashboard(Base):
     filters: Mapped[dict] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )
+    # {"id", "version", "source"} of the report template this dashboard was built
+    # from; {} for a generated one. A template's queries only run bound, so this
+    # is what makes a refresh bind the default filter values.
+    template: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
     analysis: Mapped[str | None] = mapped_column(Text)
     legacy_id: Mapped[int | None] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = _created_at()

@@ -28,7 +28,7 @@ from datatalk.integrations.jira import service as jira_service
 from datatalk.integrations.jira import sync as jira_sync
 from datatalk.integrations.jira.client import JiraClient
 from tests.conftest import give_connection, signup
-from tests.jira_fake import FakeJira, make_issue
+from tests.jira_fake import FakeJira, make_issue, points_change, sprint, sprint_change
 
 TOKEN = "jira-api-token-DO-NOT-LEAK"
 
@@ -205,8 +205,11 @@ def test_first_sync_is_full_and_fills_every_table(db, store, org_a, fake_jira):
     assert state["stats"]["full"] is True
     assert state["stats"]["tables"] == {
         "projects": 2, "users": 3, "issues": 3, "status_changes": 2,
-        "sprints": 1, "issue_sprints": 1, "worklogs": 1,
+        "boards": 1, "sprints": 1, "issue_sprints": 1,
+        # ABC-1 was created into sprint 7; each transition also moved assignee.
+        "sprint_events": 1, "field_changes": 2, "worklogs": 1,
     }
+    assert state["stats"]["boards_available"] is True
     assert conn.sync_state.cursor is not None
     assert conn.sync_state.last_synced_at is not None
     with _reader(db, conn) as r:
@@ -311,7 +314,14 @@ def test_the_agent_queries_jira_through_the_ordinary_sql_path(db, store, org_a, 
 
     text = catalog.build_catalog(ctx)
     assert "jira" in text and "issues" in text and "status_changes" in text
-    assert "synced PostgreSQL copy of Jira" in text  # the dialect hint
+    # Labelled by the SQL it speaks: `[jira]` beside ClickHouse sources got
+    # ClickHouse syntax aimed at PostgreSQL.
+    assert 'SOURCE "jira" [postgres, synced from Jira]' in text
+    assert "write PostgreSQL there even when other sources are ClickHouse" in text
+    # Shared with the main (ClickHouse) source's org, but the PostgreSQL hint
+    # appears once, and carries the two constraints that failed in practice.
+    assert text.count("PostgreSQL dialect") == 1
+    assert "count(DISTINCT (a, b))" in text and "must be parenthesized" in text
 
     detail = catalog.describe_table(ctx, "jira", "issues")
     assert "status_category" in detail and "One of 'To Do'" in detail  # column comment
@@ -403,12 +413,17 @@ def test_deleting_a_jira_source_drops_its_schema_and_role(auth_client, db, store
     created = auth_client.post(
         f"/api/orgs/{auth_client.org_id}/connections", json=_BODY
     ).json()
+    from uuid import UUID
+
+    _, role = syncstore.names_for(UUID(created["id"]))
     resp = auth_client.delete(f"/api/orgs/{auth_client.org_id}/connections/{created['id']}")
     assert resp.status_code == 204
     with syncstore.admin_connection() as c:
         assert syncstore.managed_schemas(c) == []
+        # Roles are cluster-wide, so a developer's own synced sources share
+        # this namespace: check this source's role, not "no roles at all".
         assert c.execute(
-            "SELECT count(*) FROM pg_roles WHERE rolname LIKE 'dt\\_src\\_%'"
+            "SELECT count(*) FROM pg_roles WHERE rolname = %s", (role,)
         ).fetchone()[0] == 0
 
 
@@ -491,3 +506,124 @@ def test_a_saved_dashboard_over_jira_refreshes_to_the_latest_sync(
     out = refresh_svc.refresh_dashboard(saved, ctx=ctx)
     assert out.partial is False
     assert out.document.blocks[0].value == 3
+
+
+def test_the_sql_the_postgres_hint_recommends_actually_runs(db, store, org_a, user_a, fake_jira):
+    """A hint that recommends invalid SQL is worse than none."""
+    from datatalk.agent.executor import run_sql
+
+    conn = _jira_source(db, org_a)
+    _sync(org_a, conn)
+    ctx = orgs_svc.build_tenant_context(db, org=org_a, user=user_a, role="owner")
+    sc = conn.sync_state.schema_name
+
+    distinct = run_sql(
+        f"SELECT count(DISTINCT (issue_id, changed_at)) AS n FROM {sc}.status_changes",
+        ctx=ctx, source="jira",
+    )
+    assert distinct.to_records() == [{"n": 2}]
+
+    union = run_sql(
+        f"(SELECT key FROM {sc}.issues ORDER BY key LIMIT 1) UNION ALL "
+        f"(SELECT key FROM {sc}.issues ORDER BY key DESC LIMIT 1)",
+        ctx=ctx, source="jira",
+    )
+    assert [r["key"] for r in union.to_records()] == ["ABC-1", "XYZ-1"]
+
+
+# --- history: what sprint and estimate reports are built from ----------------
+
+
+def _history_issues():
+    s8 = sprint(8, "closed", "2024-03-04 09:00", "2024-03-18 09:00", "2024-03-18 10:00")
+    s9 = sprint(9, "active", "2024-03-18 11:00", "2024-04-01 09:00")
+    return [
+        # Created into sprint 8, carried over into 9 at 8's close.
+        make_issue(
+            10, "ABC-10", created="2024-03-01 09:00", updated="2024-03-18 10:00",
+            points=5, sprints=[s8, s9],
+            history=[("2024-03-18 10:00", "sam", [sprint_change([8], [8, 9])])],
+        ),
+        # Added to 8 mid-sprint, re-estimated 2 -> 3, then removed again.
+        make_issue(
+            11, "ABC-11", created="2024-03-01 09:00", updated="2024-03-09 09:00",
+            points=3, sprints=[],
+            history=[
+                ("2024-03-06 09:00", "sam", [sprint_change([], [8])]),
+                ("2024-03-07 09:00", "sam", [points_change(2, 3)]),
+                ("2024-03-09 09:00", "sam", [sprint_change([8], [])]),
+            ],
+        ),
+    ]
+
+
+def test_sprint_membership_history_is_reconstructed(db, store, org_a, fake_jira):
+    fake_jira.issues = _history_issues()
+    conn = _jira_source(db, org_a)
+    _sync(org_a, conn)
+
+    with _reader(db, conn) as r:
+        events = r.execute(
+            "SELECT issue_key, sprint_id, action, to_char(changed_at AT TIME ZONE 'UTC', "
+            "'MM-DD HH24:MI') FROM sprint_events ORDER BY changed_at, issue_key, sprint_id"
+        ).fetchall()
+        # Removed from sprint 8 and in no sprint now: the sprint row survives
+        # the prune because its history still references it.
+        sprint_ids = [row[0] for row in r.execute("SELECT id FROM sprints ORDER BY id")]
+        points = r.execute(
+            "SELECT from_value::numeric, to_value::numeric FROM field_changes "
+            "WHERE field = 'story_points'"
+        ).fetchall()
+
+    assert events == [
+        ("ABC-10", 8, "added", "03-01 09:00"),     # created into it: no changelog item
+        ("ABC-11", 8, "added", "03-06 09:00"),     # scope added mid-sprint
+        ("ABC-11", 8, "removed", "03-09 09:00"),   # and removed again
+        ("ABC-10", 9, "added", "03-18 10:00"),     # carry-over
+    ]
+    assert sprint_ids == [8, 9]
+    assert points == [(2, 3)]
+
+
+def test_an_issue_with_no_sprint_changes_starts_in_its_current_sprints(db, store, org_a, fake_jira):
+    conn = _jira_source(db, org_a)
+    _sync(org_a, conn)  # ABC-1: sprint 7 in its field, no Sprint changelog item
+    with _reader(db, conn) as r:
+        assert r.execute(
+            "SELECT issue_key, sprint_id, action, author_id FROM sprint_events"
+        ).fetchall() == [("ABC-1", 7, "added", None)]
+
+
+def test_boards_fill_sprints_missing_a_board(db, store, org_a, fake_jira):
+    fake_jira.board_sprints = {1: [{"id": 7, "originBoardId": 1}]}
+    conn = _jira_source(db, org_a)
+    _sync(org_a, conn)
+    with _reader(db, conn) as r:
+        assert r.execute("SELECT id, name, board_type, project_key FROM boards").fetchall() == [
+            (1, "ABC board", "scrum", "ABC")
+        ]
+        assert r.execute("SELECT board_id FROM sprints WHERE id = 7").fetchone() == (1,)
+        assert r.execute("SELECT time_zone FROM _sync_meta").fetchone() == ("UTC",)
+
+
+@pytest.mark.parametrize("status", [403, 404])
+def test_no_jira_software_is_not_a_failed_sync(db, store, org_a, fake_jira, status):
+    fake_jira.agile_status = status
+    conn = _jira_source(db, org_a)
+    state = _sync(org_a, conn)
+    assert state["status"] == "ok"
+    assert state["stats"]["boards_available"] is False
+    assert state["stats"]["tables"]["boards"] == 0
+    assert state["stats"]["tables"]["issues"] == 3
+
+
+def test_a_v1_store_is_rebuilt_and_fully_resynced(db, store, org_a, fake_jira):
+    conn = _jira_source(db, org_a)
+    _sync(org_a, conn)
+    with syncstore.admin_connection() as c:
+        c.execute(
+            f"UPDATE {conn.sync_state.schema_name}._sync_meta SET schema_version = 1"
+        )
+    state = _sync(org_a, conn)  # would be incremental, but the schema is stale
+    assert state["stats"]["full"] is True
+    assert state["stats"]["tables"]["sprint_events"] == 1

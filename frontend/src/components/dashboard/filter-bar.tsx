@@ -1,6 +1,6 @@
 "use client";
 
-import { CalendarRange, Check, ChevronDown, ListFilter } from "lucide-react";
+import { CalendarRange, Check, ChevronDown, IterationCw, ListFilter } from "lucide-react";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -22,8 +22,10 @@ import {
 import type { FilterDef, FilterValue, FilterValues } from "@/lib/api/types";
 import {
   DATE_PRESETS,
+  describeSprint,
   isDateValue,
   isDimensionValue,
+  isSprintValue,
 } from "@/lib/dashboards/filters";
 import { cn } from "@/lib/utils";
 
@@ -56,23 +58,16 @@ export function FilterBar({
 
   return (
     <div className="sticky top-14 z-10 -mx-6 mb-2 flex flex-wrap items-center gap-2 border-b border-border bg-background/95 px-6 py-2 backdrop-blur">
-      {defs.map((def) =>
-        def.kind === "date_range" ? (
-          <DateRangeFilter
-            key={def.id}
-            def={def}
-            value={values[def.id]}
-            onChange={(v) => onChange(def.id, v)}
-          />
-        ) : (
-          <DimensionFilter
-            key={def.id}
-            def={def}
-            value={values[def.id]}
-            onChange={(v) => onChange(def.id, v)}
-          />
-        ),
-      )}
+      {defs.map((def) => {
+        const props = {
+          def,
+          value: values[def.id],
+          onChange: (v: FilterValue) => onChange(def.id, v),
+        };
+        if (def.kind === "date_range") return <DateRangeFilter key={def.id} {...props} />;
+        if (def.kind === "sprint") return <SprintFilter key={def.id} {...props} />;
+        return <DimensionFilter key={def.id} {...props} />;
+      })}
 
       {!isDefault && (
         <Button variant="ghost" size="sm" onClick={onReset}>
@@ -225,11 +220,14 @@ function DimensionFilter({
   const current = isDimensionValue(value) ? value : { all: true };
   const selected = new Set(current.values ?? []);
   const options = def.options ?? [];
+  // Labels are display only: the allowlist, the URL and the request all carry
+  // the value (an account id, an epic key), never the label.
+  const labelOf = (option: string) => def.option_labels?.[option] ?? option;
 
   const label = current.all
     ? "All"
     : selected.size === 1
-      ? [...selected][0]
+      ? labelOf([...selected][0])
       : `${selected.size} selected`;
 
   const toggle = (option: string) => {
@@ -284,10 +282,13 @@ function DimensionFilter({
               {options.map((option) => (
                 <CommandItem
                   key={option}
+                  // cmdk searches `value`: the label is what people type, the
+                  // raw value keeps two identically-named people distinct.
+                  value={`${labelOf(option)} ${option}`}
                   onSelect={() => toggle(option)}
                   className="justify-between"
                 >
-                  <span className="truncate">{option}</span>
+                  <span className="truncate">{labelOf(option)}</span>
                   {selected.has(option) && <Check className="size-3.5 shrink-0" />}
                 </CommandItem>
               ))}
@@ -298,6 +299,130 @@ function DimensionFilter({
           <p className="border-t border-border px-3 py-2 text-[12px] text-ink-tertiary">
             Showing the first {options.length} values found. Selecting “All” is
             not limited to this list.
+          </p>
+        )}
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+const SPRINT_GROUPS: { id: string; label: string }[] = [
+  { id: "active", label: "Active" },
+  { id: "closed", label: "Closed" },
+  { id: "future", label: "Future" },
+];
+const LAST_N_CHOICES = [3, 6, 12];
+
+/**
+ * Sprints by rule ("active", "last 6") or by name.
+ *
+ * Rules are the default because they keep meaning the right thing as sprints
+ * roll over: a saved link to "the active sprint" should not freeze on the
+ * sprint that happened to be active when it was copied.
+ */
+function SprintFilter({
+  def,
+  value,
+  onChange,
+}: {
+  def: FilterDef;
+  value: FilterValue | undefined;
+  onChange: (v: FilterValue) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const single = def.multi === false;
+  const current = isSprintValue(value) ? value : { mode: "active" as const };
+  const picked = new Set(current.mode === "ids" ? (current.ids ?? []) : []);
+  const options = def.options ?? [];
+  const labelOf = (id: string) => def.option_labels?.[id] ?? `Sprint ${id}`;
+
+  const choose = (v: FilterValue) => {
+    onChange(v);
+    setOpen(false);
+  };
+
+  const toggle = (id: string) => {
+    if (single) return choose({ mode: "ids", ids: [id] });
+    const next = new Set(picked);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    onChange(next.size ? { mode: "ids", ids: [...next].sort() } : { mode: "active" });
+  };
+
+  const rules: { key: string; label: string; value: FilterValue; on: boolean }[] = [
+    { key: "active", label: "Active sprint", value: { mode: "active" }, on: current.mode === "active" },
+    ...(single
+      ? [{
+          key: "last",
+          label: "Last completed sprint",
+          value: { mode: "last_n" as const, n: 1 },
+          on: current.mode === "last_n",
+        }]
+      : LAST_N_CHOICES.map((n) => ({
+          key: `last${n}`,
+          label: `Last ${n} sprints`,
+          value: { mode: "last_n" as const, n },
+          on: current.mode === "last_n" && current.n === n,
+        }))),
+    ...(single
+      ? []
+      : [{ key: "all", label: "All sprints", value: { mode: "all" as const }, on: current.mode === "all" }]),
+  ];
+
+  const grouped = SPRINT_GROUPS.map((g) => ({
+    ...g,
+    ids: options.filter((id) => (def.option_groups?.[id] ?? "closed") === g.id),
+  })).filter((g) => g.ids.length);
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <span>
+          <TriggerButton
+            icon={<IterationCw className="size-3.5" />}
+            label={`${def.label}: ${describeSprint(def, current)}`}
+            active={current.mode !== (def.default as { mode?: string } | null)?.mode}
+          />
+        </span>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-72 p-0">
+        <Command>
+          <CommandInput placeholder="Search sprints…" />
+          <CommandList>
+            <CommandEmpty>No matching sprints.</CommandEmpty>
+            <CommandGroup>
+              {rules.map((r) => (
+                <CommandItem
+                  key={r.key}
+                  value={r.label}
+                  onSelect={() => choose(r.value)}
+                  className="justify-between"
+                >
+                  {r.label}
+                  {r.on && <Check className="size-3.5" />}
+                </CommandItem>
+              ))}
+            </CommandGroup>
+            {grouped.map((g) => (
+              <CommandGroup key={g.id} heading={g.label}>
+                {g.ids.map((id) => (
+                  <CommandItem
+                    key={id}
+                    value={`${labelOf(id)} ${id}`}
+                    onSelect={() => toggle(id)}
+                    className="justify-between"
+                  >
+                    <span className="truncate">{labelOf(id)}</span>
+                    {picked.has(id) && <Check className="size-3.5 shrink-0" />}
+                  </CommandItem>
+                ))}
+              </CommandGroup>
+            ))}
+          </CommandList>
+        </Command>
+        {!options.length && (
+          <p className="border-t border-border px-3 py-2 text-[12px] text-ink-tertiary">
+            No sprints were found in the synced data.
           </p>
         )}
       </PopoverContent>

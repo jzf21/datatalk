@@ -171,6 +171,18 @@ class JiraClient:
             self._offset_pages(f"/rest/api/3/issue/{issue_id}/worklog", key="worklogs")
         )
 
+    # --- Jira Software (agile) --------------------------------------------------
+    # Only sites with Jira Software have these, and only accounts with board
+    # access see them; the sync treats a failure here as "no boards".
+
+    def boards(self) -> list[dict[str, Any]]:
+        return list(self._offset_pages("/rest/agile/1.0/board", key="values"))
+
+    def board_sprints(self, board_id: int) -> list[dict[str, Any]]:
+        return list(
+            self._offset_pages(f"/rest/agile/1.0/board/{int(board_id)}/sprint", key="values")
+        )
+
     def _offset_pages(self, path: str, *, key: str) -> Iterator[dict[str, Any]]:
         start = 0
         while True:

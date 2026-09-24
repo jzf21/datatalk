@@ -83,6 +83,8 @@ class SavedDashboard:
     # dashboards saved before it was persisted -- see `is_refreshable`.
     authoring_document: Document = field(default_factory=Document)
     filters: dict[str, Any] = field(default_factory=dict)
+    # {"id", "version", "source"} when built from a report template, else {}.
+    template: dict[str, Any] = field(default_factory=dict)
 
     @property
     def is_refreshable(self) -> bool:
@@ -351,8 +353,12 @@ class MemoryStore:
         title: str | None = None,
         insights: dict[str, Any] | None = None,
         authoring_document: Document | None = None,
+        filters: dict[str, Any] | None = None,
+        template: dict[str, Any] | None = None,
     ) -> SavedDashboard:
         queries = queries or []
+        filters = filters or {}
+        template = template or {}
         insights = insights or {}
         authoring_document = authoring_document or Document()
         title = title or self._derive_title(request)
@@ -365,7 +371,8 @@ class MemoryStore:
             queries=queries,
             insights=insights,
             authoring_document=authoring_document.to_dict(),
-            filters={},
+            filters=filters,
+            template=template,
             analysis=None,
         )
         self._db.add(row)
@@ -381,7 +388,8 @@ class MemoryStore:
             analysis=None,
             created_by_user_id=row.created_by_user_id,
             authoring_document=authoring_document,
-            filters={},
+            filters=filters,
+            template=template,
         )
 
     @staticmethod
@@ -398,6 +406,7 @@ class MemoryStore:
             created_by_user_id=r.created_by_user_id,
             authoring_document=Document.from_dict(r.authoring_document or {}),
             filters=dict(r.filters or {}),
+            template=dict(r.template or {}),
         )
 
     def get_dashboard(self, dashboard_id: int) -> SavedDashboard | None:
@@ -421,6 +430,37 @@ class MemoryStore:
             .where(models.Dashboard.id == dashboard_id)
             .where(models.Dashboard.org_id == self.org_id)
             .values(analysis=analysis)
+        )
+        return bool(result.rowcount)
+
+    def update_dashboard_content(
+        self,
+        dashboard_id: int,
+        *,
+        queries: list[dict[str, Any]] | None = None,
+        filters: dict[str, Any] | None = None,
+        authoring_document: Document | None = None,
+    ) -> bool:
+        """Replace any of a dashboard's editable parts. False for another org's id.
+
+        The materialized ``document`` is deliberately not among them: it is the
+        snapshot the dashboard was generated with, and ``analysis`` is prose
+        about it. An edited layout is seen through a refresh, like a filter.
+        """
+        values: dict[str, Any] = {}
+        if queries is not None:
+            values["queries"] = queries
+        if filters is not None:
+            values["filters"] = filters
+        if authoring_document is not None:
+            values["authoring_document"] = authoring_document.to_dict()
+        if not values:
+            return self.get_dashboard(dashboard_id) is not None
+        result = self._db.execute(
+            update(models.Dashboard)
+            .where(models.Dashboard.id == dashboard_id)
+            .where(models.Dashboard.org_id == self.org_id)
+            .values(**values)
         )
         return bool(result.rowcount)
 

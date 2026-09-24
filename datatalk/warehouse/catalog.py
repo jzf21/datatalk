@@ -166,7 +166,7 @@ def _source_block(ctx: "TenantContext", ref: "SourceRef", force_refresh: bool) -
     # The name is quoted because it is the single thing models most reliably
     # get wrong here: it is a run_sql argument, not an identifier, and unquoted
     # beside `database.table` lines it reads like one more schema name.
-    header = f'SOURCE "{ref.name}" [{ref.type}]'
+    header = f'SOURCE "{ref.name}" [{_label(ref.type)}]'
     if ref.description:
         header += f" — {ref.description}"
 
@@ -184,6 +184,15 @@ def _source_block(ctx: "TenantContext", ref: "SourceRef", force_refresh: bool) -
         lines.append(scope)
     lines.append(render_table_summary(tables))
     return "\n".join(lines)
+
+
+def _label(type_: str) -> str:
+    from datatalk.warehouse import dialect_for
+
+    try:
+        return dialect_for(type_).label or type_
+    except Exception:  # noqa: BLE001 - an unknown type still gets a header
+        return type_
 
 
 def _scope_note(ref: "SourceRef", tables: list[Table]) -> str:
@@ -275,17 +284,21 @@ def _sql_rules(ctx: "TenantContext") -> str:
             "a column means."
         )
 
-    seen: set[str] = set()
+    # One line per distinct *dialect hint*, not per type: a synced Jira source
+    # speaks PostgreSQL and shares its hint, which must not print twice. Type
+    # notes follow the dialect hints they depend on.
+    hints: list[str] = []
+    notes: list[str] = []
     for ref in ctx.sources:
-        if ref.type in seen:
-            continue
-        seen.add(ref.type)
         try:
-            hint = dialect_for(ref.type).prompt_hint
+            dialect = dialect_for(ref.type)
         except Exception:  # noqa: BLE001 - an unknown type is not fatal here
             continue
-        if hint:
-            lines.append(f"- {hint}")
+        if dialect.prompt_hint and dialect.prompt_hint not in hints:
+            hints.append(dialect.prompt_hint)
+        if dialect.notes and dialect.notes not in notes:
+            notes.append(dialect.notes)
+    lines.extend(f"- {h}" for h in hints + notes)
     return "\n".join(lines)
 
 

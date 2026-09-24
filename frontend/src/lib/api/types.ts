@@ -195,31 +195,96 @@ export interface DashboardDetail extends DashboardSummary {
   refreshable: boolean;
   /** Per-dashboard filter definitions; {} when none are configured. */
   filters: DashboardFilters;
+  /** The report template this was built from; {} for a generated dashboard. */
+  template: DashboardTemplateRef | Record<string, never>;
+  /** The pre-materialization document the layout editor edits. */
+  authoring_document: BlockDocument;
+  /** False for dashboards saved before the authoring document was kept. */
+  editable: boolean;
+  /** A template dashboard's addable widgets; [] for a generated one. */
+  widget_catalog: WidgetCatalogEntry[];
+}
+
+export interface WidgetCatalogEntry {
+  key: string;
+  title: string;
+  description: string;
+}
+
+export interface DashboardTemplateRef {
+  id: string;
+  version: number;
+  source: string;
+}
+
+/** One entry of GET /api/dashboard-templates. */
+export interface ReportTemplateSummary {
+  id: string;
+  version: number;
+  title: string;
+  description: string;
+  family: "sprint" | "flow" | "backlog" | "people";
+  /** Filter labels, in bar order. */
+  filters: string[];
+  /** Widget titles placed by default. */
+  widgets: string[];
+  /** The org's sources this template can run on. */
+  sources: string[];
+}
+
+export interface FromTemplateResponse {
+  dashboard_id: number;
+  title: string;
+  partial: boolean;
+  datasets: DatasetStatus[];
 }
 
 /** Mirrors dashboards.filters in Postgres. Empty until filters are configured. */
 export interface DashboardFilters {
   version?: number;
   filters?: FilterDef[];
+  /** Per-dataset templates: wiring (`filters`) and pinned `overrides`. */
+  templates?: Record<string, DatasetFilterTemplate>;
 }
+
+export interface DatasetFilterTemplate {
+  /** Bound parameters, named `p_<filter id>_<suffix>`. */
+  params?: { name: string; type: string }[];
+  columns?: string[];
+  /** The filters this dataset is wired to; absent = all of them. */
+  filters?: string[];
+  /** A selection pinned for this dataset alone, by filter id. */
+  overrides?: FilterValues;
+}
+
+export type FilterKind = "date_range" | "dimension" | "sprint";
 
 export interface FilterDef {
   id: string;
-  kind: "date_range" | "dimension";
+  kind: FilterKind;
   label: string;
   /** dimension only */
   column?: string;
   source?: string;
+  /** false: exactly one value (a single-sprint report). */
   multi?: boolean;
+  /** Allowlisted values. For a sprint filter, sprint ids. */
   options?: string[];
+  /** Display text per value; the allowlist is always the values. */
+  option_labels?: Record<string, string>;
+  /** A grouping per value (a sprint's state), display only. */
+  option_groups?: Record<string, string>;
   /** True when the option probe hit its cap -- a UI badge, not a correctness issue. */
   options_truncated?: boolean;
   default?: FilterValue | null;
 }
 
+export type SprintMode = "active" | "last_n" | "ids" | "all";
+
 export type FilterValue =
   | { preset?: string; from?: string; to?: string }
-  | { all?: boolean; values?: string[] };
+  | { all?: boolean; values?: string[] }
+  | { mode?: SprintMode; n?: number; ids?: string[] };
 
 /** Selections keyed by filter id, as sent to /refresh. */
 export type FilterValues = Record<string, FilterValue>;
@@ -268,6 +333,8 @@ export interface DashboardData {
   frozen_stats: number;
   /** Datasets no filter could be bound to, so their numbers ignore the selection. */
   unfiltered: string[];
+  /** Dataset id -> filters its author deliberately left unwired. */
+  unwired?: Record<string, string[]>;
   applied_filters: FilterValues;
 }
 
@@ -288,6 +355,8 @@ export interface AnalyzeResponse {
 /** Every line is `{"kind": ..., "data": {...}}`. */
 export type RunEvent =
   | { kind: "memory"; data: { count: number; suggestions: string[] } }
+  // An AI widget was appended to a dashboard (POST .../widgets/ai).
+  | { kind: "widget"; data: { dataset_ids: string[]; queries: CapturedQuery[] } }
   // step/max_steps arrive on the analyst loop's turn announcements. A step is
   // one assistant *turn*, which under batching runs several queries.
   | { kind: "status"; data: { message: string; step?: number; max_steps?: number } }

@@ -121,6 +121,9 @@ class RefreshResult:
     # selection. Reported rather than hidden: a widget silently unaffected by a
     # filter is the failure mode this feature exists to avoid.
     unfiltered: list[str] = field(default_factory=list)
+    # dataset id -> filters its author deliberately unwired from it. Not
+    # "partial": the widget is doing what it was configured to do.
+    unwired: dict[str, list[str]] = field(default_factory=dict)
 
     @property
     def partial(self) -> bool:
@@ -211,7 +214,10 @@ def refresh_dashboard(
     still raise :class:`~datatalk.context.NoConnectionError` if the org has no
     sources at all, which the endpoint pre-empts with ``require_connection``.
     """
-    if bindings is None and selections:
+    # A template dashboard's SQL exists only in bound form, so it binds even
+    # with no selections -- every filter then takes its stored default.
+    unwired: dict[str, list[str]] = {}
+    if bindings is None and (selections or saved.template):
         # Resolve here rather than at the endpoint so the dialect lookup and the
         # per-dataset degradation live beside the execution they affect.
         dialects = {}
@@ -223,9 +229,18 @@ def refresh_dashboard(
                 dialects[dataset_id] = ctx.warehouse(entry.get("source")).dialect
             except Exception:  # noqa: BLE001 - a dead source fails per-query below
                 continue
-        binding_set = build_bindings(saved.filters or {}, selections, dialects)
+        binding_set = build_bindings(saved.filters or {}, selections or {}, dialects)
         bindings = binding_set.bound
-        unfiltered = binding_set.unfiltered
+        unfiltered = list(binding_set.unfiltered)
+        unwired = binding_set.unwired
+        # A dataset with no template at all (its rewrite was refused, or it was
+        # added after the filters were configured) runs unfiltered too, and is
+        # named the same way -- never left looking filtered.
+        if (saved.filters or {}).get("filters"):
+            templated = set((saved.filters or {}).get("templates") or {})
+            unfiltered += [
+                ds for ds in dialects if ds not in templated and ds not in unfiltered
+            ]
     else:
         unfiltered = []
 
@@ -285,4 +300,5 @@ def refresh_dashboard(
         frozen_stats=0 if exact else frozen_stat_count(document),
         exact=exact,
         unfiltered=unfiltered,
+        unwired=unwired,
     )

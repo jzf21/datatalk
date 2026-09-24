@@ -74,8 +74,17 @@ class Dialect:
     # neutral template against it, and nothing outside this package ever learns
     # that ClickHouse writes `{name:Type}` where Postgres writes `%(name)s`.
     param_style: str = "pyformat"  # pyformat (psycopg) | curly (clickhouse)
-    # Appended to the schema catalog so prompts stay engine-neutral.
+    # Appended to the schema catalog so prompts stay engine-neutral. Pure SQL
+    # dialect guidance: it is also what the dashboard templatizer is shown.
     prompt_hint: str = ""
+    # How the catalog labels a source of this type, when ``type`` alone would
+    # not tell the model which SQL to write -- a synced Jira source is
+    # PostgreSQL, and ``[jira]`` beside ``[clickhouse]`` sources reads as
+    # "some other engine". Empty = the type itself.
+    label: str = ""
+    # Source-type notes beyond the dialect (what the synced tables mean).
+    # Rendered once, after the dialect hints.
+    notes: str = ""
 
     @property
     def forbidden(self) -> frozenset[str]:

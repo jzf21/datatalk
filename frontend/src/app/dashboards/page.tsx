@@ -10,6 +10,7 @@ import { DocumentView } from "@/components/doc/block-renderer";
 import { InsightPanel } from "@/components/doc/insight-panel";
 import { SourcesProvider } from "@/components/doc/sources-context";
 import { SourcesRail } from "@/components/doc/sources-rail";
+import { TemplateGallery } from "@/components/dashboard/template-gallery";
 import { useNdjsonRun } from "@/hooks/use-ndjson-run";
 import { streamDashboard } from "@/lib/api/endpoints";
 import { qk } from "@/lib/api/queries";
@@ -53,16 +54,19 @@ export default function DashboardsPage() {
 
       <PageBody className="space-y-10">
         {idle && (
-          <div className="py-8 sm:py-14">
-            <Composer
-              heading="Build a dashboard"
-              subheading="one request, a whole grid."
-              placeholder="e.g. An operations dashboard for support: volume, SLA compliance, and the accounts at risk."
-              examples={EXAMPLES}
-              submitLabel="Generate"
-              onSubmit={generate}
-            />
-          </div>
+          <>
+            <div className="py-8 sm:py-14">
+              <Composer
+                heading="Build a dashboard"
+                subheading="one request, a whole grid."
+                placeholder="e.g. An operations dashboard for support: volume, SLA compliance, and the accounts at risk."
+                examples={EXAMPLES}
+                submitLabel="Generate"
+                onSubmit={generate}
+              />
+            </div>
+            <TemplateGallery />
+          </>
         )}
 
         {!idle && !state.document && (

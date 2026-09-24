@@ -217,3 +217,90 @@ def test_a_dataset_with_a_broken_template_is_reported_not_executed():
 def test_a_dashboard_with_no_templates_binds_nothing():
     out = build_bindings({"filters": []}, {}, {}, now=NOW)
     assert out.bound == {} and out.unfiltered == []
+
+
+# --- sprint filters ----------------------------------------------------------
+
+SPRINT = {"id": "sprint", "kind": "sprint", "label": "Sprint", "multi": True,
+          "options": ["41", "42"], "option_labels": {"42": "Sprint 42"},
+          "default": {"mode": "last_n", "n": 6}}
+ONE_SPRINT = {**SPRINT, "multi": False, "default": {"mode": "active"}}
+
+
+def _sprint(defn, selection):
+    return coerce_values({"filters": [defn]}, {"sprint": selection}, now=NOW)
+
+
+def test_a_sprint_filter_binds_mode_count_and_ids():
+    assert _sprint(SPRINT, {"mode": "ids", "ids": ["42"]}) == {
+        "p_sprint_mode": "ids", "p_sprint_n": 1, "p_sprint_ids": ["42"],
+    }
+    assert _sprint(SPRINT, {"mode": "last_n", "n": 3})["p_sprint_n"] == 3
+    # Unmentioned: its default, not "everything".
+    assert coerce_values({"filters": [SPRINT]}, {}, now=NOW)["p_sprint_n"] == 6
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        {"mode": "drop table"},
+        {"mode": "last_n", "n": 0},
+        {"mode": "last_n", "n": 27},
+        {"mode": "last_n", "n": "3"},
+        {"mode": "last_n", "n": True},
+        {"mode": "ids", "ids": []},
+        {"mode": "ids", "ids": ["43"]},              # not an option
+        {"mode": "ids", "ids": ["Sprint 42"]},       # a label is not a value
+    ],
+)
+def test_a_bad_sprint_selection_is_rejected(selection):
+    with pytest.raises(FilterError) as exc:
+        _sprint(SPRINT, selection)
+    assert exc.value.code == "filter_value_invalid"
+
+
+def test_a_single_sprint_filter_means_one_sprint():
+    with pytest.raises(FilterError):
+        _sprint(ONE_SPRINT, {"mode": "ids", "ids": ["41", "42"]})
+    with pytest.raises(FilterError):
+        _sprint(ONE_SPRINT, {"mode": "all"})
+    # "Last completed", not the last six.
+    assert _sprint(ONE_SPRINT, {"mode": "last_n", "n": 6})["p_sprint_n"] == 1
+
+
+# --- per-widget wiring and overrides -----------------------------------------
+
+
+def _wired(template_extra, selections):
+    filters = {**FILTERS, "templates": {"q1": {**FILTERS["templates"]["q1"], **template_extra}}}
+    return build_bindings(filters, selections, {"q1": POSTGRES_DIALECT}, now=NOW)
+
+
+def test_a_filter_a_widget_is_not_wired_to_binds_as_all():
+    out = _wired({"filters": ["range"]}, {"region": {"values": ["EMEA"]}})
+    params = out.bound["q1"].parameters
+    assert params["p_region_all"] is True
+    assert out.unwired == {"q1": ["region"]}
+    assert out.unfiltered == []
+
+
+def test_an_override_pins_a_widgets_selection():
+    out = _wired(
+        {"filters": ["range", "region"], "overrides": {"region": {"values": ["APAC"]}}},
+        {"region": {"values": ["EMEA"]}},
+    )
+    params = out.bound["q1"].parameters
+    assert (params["p_region_all"], params["p_region_values"]) == (False, ["APAC"])
+    assert out.unwired == {}
+
+
+def test_an_override_is_allowlisted_like_a_selection():
+    out = _wired({"overrides": {"region": {"values": ["'; DROP TABLE x; --"]}}}, {})
+    # A bad stored override degrades its dataset; it never reaches a query.
+    assert out.bound == {} and out.unfiltered == ["q1"]
+
+
+def test_a_template_without_wiring_takes_every_filter():
+    out = _wired({}, {"region": {"values": ["EMEA"]}})
+    assert out.bound["q1"].parameters["p_region_values"] == ["EMEA"]
+    assert out.unwired == {}

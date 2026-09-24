@@ -23,20 +23,31 @@ documented here rather than in a schema file:
         {"id": "region", "kind": "dimension", "label": "Region",
          "column": "region", "source": "prod_pg", "multi": true,
          "options": ["EMEA", "APAC"], "options_truncated": false,
-         "default": {"all": true}}
+         "option_labels": {"EMEA": "Europe"},          # optional, display only
+         "default": {"all": true}},
+        {"id": "sprint", "kind": "sprint", "label": "Sprint", "multi": false,
+         "options": ["41", "42"], "option_labels": {"42": "Sprint 42"},
+         "option_groups": {"42": "active"},             # optional, display only
+         "default": {"mode": "active"}}
       ],
       "templates": {
         "q1": {"sql": "... {{dt.p_range_from}} ...",
                "params": [{"name": "p_range_from", "type": "date"}, ...],
                "columns": ["month", "revenue"],
-               "filters": ["range", "region"]}
+               "filters": ["range", "region"],
+               "overrides": {"region": {"values": ["EMEA"]}}}   # optional
       }
     }
+
+A dataset's ``filters`` list is its *wiring*: a dashboard filter it does not
+list is bound as "all" for that dataset (and reported in ``unwired``), and an
+``overrides`` entry pins that filter's selection for that dataset alone. Both go
+through the same coercion and allowlist as a viewer's selection.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -45,6 +56,7 @@ from datatalk.warehouse.binding import BoundQuery, ParamSpec, TemplateError, bin
 
 __all__ = [
     "DATE_PRESETS",
+    "SPRINT_MODES",
     "MAX_DIMENSION_VALUES",
     "FilterError",
     "build_bindings",
@@ -66,6 +78,11 @@ DATE_PRESETS: dict[str, int | None] = {
 
 MAX_DIMENSION_VALUES = 100
 MAX_VALUE_CHARS = 200
+
+# A sprint filter picks sprints by rule, resolved in SQL against the synced
+# sprints table, so "active" keeps meaning the active sprint as sprints roll.
+SPRINT_MODES = frozenset({"active", "last_n", "ids", "all"})
+MAX_LAST_N_SPRINTS = 26
 
 
 class FilterError(ValueError):
@@ -191,6 +208,71 @@ def _coerce_dimension(
     return {param_name(fid, "all"): False, param_name(fid, "values"): values}
 
 
+def _coerce_sprint(defn: dict[str, Any], selection: dict[str, Any]) -> dict[str, Any]:
+    fid = defn["id"]
+    single = defn.get("multi") is False
+    mode = selection.get("mode") or "active"
+    if mode not in SPRINT_MODES or (single and mode == "all"):
+        raise FilterError("filter_value_invalid", f"{fid}: unknown sprint mode {mode!r}")
+
+    n = 1
+    if mode == "last_n":
+        raw_n = selection.get("n", 1)
+        if isinstance(raw_n, bool) or not isinstance(raw_n, int):
+            raise FilterError("filter_value_invalid", f"{fid}.n must be an integer")
+        if not 1 <= raw_n <= MAX_LAST_N_SPRINTS:
+            raise FilterError(
+                "filter_value_invalid", f"{fid}.n must be 1..{MAX_LAST_N_SPRINTS}"
+            )
+        # A single-sprint report shows "the last completed sprint", not six.
+        n = 1 if single else raw_n
+
+    ids: list[str] = [""]  # the same never-compared sentinel as a dimension's
+    if mode == "ids":
+        raw = selection.get("ids") or []
+        if not isinstance(raw, list) or not raw:
+            raise FilterError("filter_value_invalid", f"{fid}.ids must be a non-empty list")
+        if len(raw) > (1 if single else MAX_DIMENSION_VALUES):
+            raise FilterError("filter_value_invalid", f"{fid}: too many sprints selected")
+        allowed = set(defn.get("options") or [])
+        for one in raw:
+            if not isinstance(one, str) or one not in allowed:
+                raise FilterError(
+                    "filter_value_invalid", f"{fid}: {one!r} is not an available sprint"
+                )
+        ids = list(raw)
+
+    return {
+        param_name(fid, "mode"): mode,
+        param_name(fid, "n"): n,
+        param_name(fid, "ids"): ids,
+    }
+
+
+def _coerce_one(
+    defn: dict[str, Any], selection: dict[str, Any], now: datetime
+) -> dict[str, Any]:
+    kind = defn.get("kind")
+    if kind == "date_range":
+        return _coerce_date_range(defn, selection, now)
+    if kind == "dimension":
+        return _coerce_dimension(defn, selection)
+    if kind == "sprint":
+        return _coerce_sprint(defn, selection)
+    raise FilterError("filter_value_invalid", f"{defn.get('id')}: unknown filter kind")
+
+
+def _all_selection(defn: dict[str, Any]) -> dict[str, Any]:
+    """What "this filter does not apply here" means for each kind."""
+    if defn.get("kind") == "date_range":
+        return {"preset": "all_time"}
+    if defn.get("kind") == "sprint":
+        # A single-sprint widget cannot be "all sprints"; unwiring it keeps it
+        # on the active sprint, which is what the widget was built around.
+        return {"mode": "active"} if defn.get("multi") is False else {"mode": "all"}
+    return {"all": True}
+
+
 def coerce_values(
     filters: dict[str, Any],
     selections: dict[str, Any],
@@ -218,13 +300,43 @@ def coerce_values(
         selection = selections.get(fid)
         if not isinstance(selection, dict):
             selection = defn.get("default") or {}
-        if defn.get("kind") == "date_range":
-            out.update(_coerce_date_range(defn, selection, now))
-        elif defn.get("kind") == "dimension":
-            out.update(_coerce_dimension(defn, selection))
-        else:
-            raise FilterError("filter_value_invalid", f"{fid}: unknown filter kind")
+        out.update(_coerce_one(defn, selection, now))
     return out
+
+
+def dataset_values(
+    filters: dict[str, Any],
+    template: dict[str, Any],
+    values: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> tuple[dict[str, Any], list[str]]:
+    """``values`` adjusted for one dataset's wiring and overrides.
+
+    Returns ``(values, unwired filter ids)``. A template without a ``filters``
+    list is wired to everything, which is how templates written before wiring
+    was editable keep their behaviour.
+    """
+    now = now or datetime.now(timezone.utc)
+    by_id = {
+        d["id"]: d for d in filters.get("filters") or [] if isinstance(d, dict) and d.get("id")
+    }
+    wired = template.get("filters")
+    overrides = template.get("overrides") or {}
+    if wired is None and not overrides:
+        return values, []
+
+    out = dict(values)
+    unwired: list[str] = []
+    for fid, defn in by_id.items():
+        if fid in overrides:
+            if not isinstance(overrides[fid], dict):
+                raise FilterError("filter_value_invalid", f"{fid}: bad override")
+            out.update(_coerce_one(defn, overrides[fid], now))
+        elif wired is not None and fid not in wired:
+            out.update(_coerce_one(defn, _all_selection(defn), now))
+            unwired.append(fid)
+    return out, unwired
 
 
 # --- bindings ----------------------------------------------------------------
@@ -236,6 +348,8 @@ class BindingSet:
 
     bound: dict[str, BoundQuery]
     unfiltered: list[str]
+    # dataset id -> dashboard filters it is deliberately not wired to.
+    unwired: dict[str, list[str]] = field(default_factory=dict)
 
 
 def build_bindings(
@@ -259,27 +373,35 @@ def build_bindings(
     if not templates:
         return BindingSet(bound={}, unfiltered=[])
 
+    now = now or datetime.now(timezone.utc)
     values = coerce_values(filters, selections, now=now)
 
     bound: dict[str, BoundQuery] = {}
     unfiltered: list[str] = []
+    unwired: dict[str, list[str]] = {}
     for dataset_id, template in templates.items():
         dialect = dialects.get(dataset_id)
         if not isinstance(template, dict) or dialect is None:
             unfiltered.append(dataset_id)
             continue
         try:
+            # Wiring and overrides are the dashboard author's, stored beside the
+            # template; a bad one is a stored-state problem, so it degrades this
+            # dataset like a malformed template rather than 400ing the viewer.
+            ds_values, ds_unwired = dataset_values(filters, template, values, now=now)
             params = [
                 ParamSpec(name=p["name"], type=p["type"])
                 for p in template.get("params") or []
             ]
             bound[dataset_id] = bind(
-                template.get("sql") or "", params, values, dialect
+                template.get("sql") or "", params, ds_values, dialect
             )
-        except (TemplateError, KeyError, TypeError):
+            if ds_unwired:
+                unwired[dataset_id] = ds_unwired
+        except (TemplateError, FilterError, KeyError, TypeError):
             # A template that disagrees with its own parameter list, or with a
             # definition edited since. Never a 500, and never a query built from
             # a half-rendered template.
             unfiltered.append(dataset_id)
 
-    return BindingSet(bound=bound, unfiltered=unfiltered)
+    return BindingSet(bound=bound, unfiltered=unfiltered, unwired=unwired)
