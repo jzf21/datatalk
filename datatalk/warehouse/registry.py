@@ -10,11 +10,14 @@ import hashlib
 
 from datatalk.warehouse.base import Dialect, Warehouse, WarehouseSpec
 from datatalk.warehouse.clickhouse import CLICKHOUSE_DIALECT, ClickHouseWarehouse
+from datatalk.warehouse.jira import JIRA_DIALECT, JiraWarehouse
 from datatalk.warehouse.postgres import POSTGRES_DIALECT, PostgresWarehouse
 
 ADAPTERS = {
     "clickhouse": (ClickHouseWarehouse, CLICKHOUSE_DIALECT),
     "postgres": (PostgresWarehouse, POSTGRES_DIALECT),
+    # Not a live engine: a synced copy in the sync store. See warehouse/jira.py.
+    "jira": (JiraWarehouse, JIRA_DIALECT),
 }
 
 WAREHOUSE_TYPES = tuple(ADAPTERS)

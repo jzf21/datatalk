@@ -40,6 +40,14 @@ const DETAIL_MESSAGES: Record<string, string> = {
   signup_disabled: "Signup is disabled on this server.",
   duplicate_source_name: "A data source with that name already exists.",
   connection_not_found: "That data source no longer exists.",
+  jira_host_not_allowed:
+    "That isn't a Jira Cloud site. Use your site's address, e.g. acme.atlassian.net.",
+  sync_store_unconfigured:
+    "This server isn't set up for synced sources yet (DATATALK_SYNC_DATABASE_URL).",
+  sync_store_error: "Couldn't prepare storage for this source. Check the server logs.",
+  source_type_immutable:
+    "A synced source can't be converted to a live one, or back. Remove it and add a new one.",
+  sync_in_progress: "This source is already syncing.",
   context_file_not_found: "That context file no longer exists.",
   context_file_exists: "A context file with that path already exists.",
   context_file_limit: "This workspace has reached its context file limit.",

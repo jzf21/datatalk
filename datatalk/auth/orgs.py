@@ -164,13 +164,7 @@ def spec_from_connection(
 
     return WarehouseSpec(
         type=connection.type,
-        host=connection.host,
-        port=connection.port,
-        username=connection.username,
-        password=connection.password or "",
-        database=connection.database,
-        secure=connection.secure,
-        sslmode=connection.sslmode,
+        **_reach(connection, s),
         introspect_databases=tuple(connection.introspect_databases or ()),
         introspect_tables=tuple(
             t.lower() for t in (connection.introspect_tables or ())
@@ -190,6 +184,55 @@ def spec_from_connection(
             connection.sql_timeout_seconds, s.sql_timeout_seconds
         ),
     )
+
+
+def _reach(connection: models.OrgWarehouseConnection, s: Settings) -> dict:
+    """The connection half of a spec: where to connect, and as whom.
+
+    For a SQL engine that is the row itself. For a synced source (Jira) it is
+    the *sync store*, as that source's read-only login role -- the row's own
+    host and password are the Jira site and API token, which only the sync job
+    ever uses. So the credential an agent holds can read one schema and nothing
+    else, and a Jira token cannot reach a prompt, a trace, or a warehouse pool.
+
+    A synced source whose store or state is missing gets a host that cannot
+    resolve, so it renders UNAVAILABLE in the catalog instead of breaking the
+    org's context -- never an empty host, which libpq reads as the local socket.
+    """
+    if connection.type != "jira":
+        return {
+            "host": connection.host,
+            "port": connection.port,
+            "username": connection.username,
+            "password": connection.password or "",
+            "database": connection.database,
+            "secure": connection.secure,
+            "sslmode": connection.sslmode,
+        }
+
+    from datatalk.integrations import syncstore
+
+    state = connection.sync_state
+    if state is None or not syncstore.is_configured(s):
+        return {
+            "host": syncstore.UNREACHABLE_HOST,
+            "port": 5432,
+            "username": "unprovisioned",
+            "password": "",
+            "database": "unprovisioned",
+            "secure": False,
+            "sslmode": None,
+        }
+    ep = syncstore.endpoint(s)
+    return {
+        "host": ep.host,
+        "port": ep.port,
+        "username": state.role_name,
+        "password": state.role_password or "",
+        "database": ep.database,
+        "secure": False,
+        "sslmode": ep.sslmode,
+    }
 
 
 def source_ref(

@@ -1,0 +1,51 @@
+{
+  "_comment": [
+    "The shipped workspace context model, mirroring the datacontext_files table:",
+    "path, one-line summary, and which (source, table) pairs the file documents.",
+    "Only the summaries reach every prompt -- bodies are fetched by the agent",
+    "through read_context, which is the two-tier bargain the feature is built on.",
+    "Keep summaries short and specific: they are the only signal the agent has",
+    "for deciding which file is worth a turn."
+  ],
+  "files": [
+    {
+      "path": "overview.md",
+      "summary": "What the business sells, which of the two warehouses holds what, and the period the data covers.",
+      "covers": []
+    },
+    {
+      "path": "ontology/orders.md",
+      "summary": "Orders, line items and refunds: the revenue formula, which statuses count, and gross vs net.",
+      "covers": [
+        {"source": "sales", "table": "orders"},
+        {"source": "sales", "table": "order_items"},
+        {"source": "sales", "table": "refunds"}
+      ]
+    },
+    {
+      "path": "ontology/customers.md",
+      "summary": "The customer master: segments, countries, and what 'active customer' means.",
+      "covers": [
+        {"source": "sales", "table": "customers"}
+      ]
+    },
+    {
+      "path": "ontology/traffic.md",
+      "summary": "Page views and daily ad spend: sessions, channels, and cost per order.",
+      "covers": [
+        {"source": "events", "table": "page_views"},
+        {"source": "events", "table": "marketing_spend"}
+      ]
+    },
+    {
+      "path": "playbooks/revenue-analysis.md",
+      "summary": "How to answer any 'how much did we make from X' question, and the join traps that inflate it.",
+      "covers": []
+    },
+    {
+      "path": "playbooks/channel-performance.md",
+      "summary": "How to answer channel questions across both warehouses: spend, cost per order, ROAS.",
+      "covers": []
+    }
+  ]
+}

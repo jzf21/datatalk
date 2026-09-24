@@ -6,6 +6,7 @@ import {
   apiPost,
   apiPut,
 } from "./client";
+import { streamNdjson } from "./stream";
 
 export interface AuthUser {
   id: string;
@@ -82,7 +83,12 @@ export async function switchOrgAndReload(orgId: string): Promise<void> {
 
 // --- per-org data sources ----------------------------------------------------
 
-export type WarehouseType = "clickhouse" | "postgres";
+/**
+ * `jira` is not a live engine: it is synced into a read-only Postgres schema
+ * on the server and queried there, so it carries a sync state and no scope
+ * picker. See `isSyncedSource` in lib/connections/sources.ts.
+ */
+export type WarehouseType = "clickhouse" | "postgres" | "jira";
 
 export type SslMode =
   | "disable"
@@ -122,7 +128,34 @@ export interface ConnectionInput {
    */
   introspect_databases?: string[];
   introspect_tables?: string[];
+  /** Jira only: the JQL that scopes what is synced. Empty = everything. */
+  scope_query?: string | null;
 }
+
+/** How fresh a synced (Jira) source is. Null for live warehouses. */
+export interface SyncState {
+  status: "never" | "running" | "ok" | "error";
+  last_synced_at: string | null;
+  error: string | null;
+  stats: {
+    full?: boolean;
+    issues_synced?: number;
+    issues_deleted?: number;
+    seconds?: number;
+    tables?: Record<string, number>;
+  };
+}
+
+/** Events on the sync stream. `synced` carries the new state; `error` a
+ * `code` (`sync_in_progress` | `sync_failed`) and a message. */
+export type SyncEvent =
+  | { kind: "start"; data: { full: boolean; jql: string; rebuilt: boolean } }
+  | { kind: "page"; data: { issues: number } }
+  | { kind: "progress"; data: SyncState["stats"] }
+  | { kind: "synced"; data: SyncState }
+  | { kind: "error"; data: { code: string; message: string } }
+  | { kind: "ping"; data: Record<string, never> }
+  | { kind: "done"; data: Record<string, never> };
 
 /** One namespace as the discover endpoint reports it. */
 export interface DiscoveredNamespace {
@@ -141,6 +174,7 @@ export interface ConnectionPublic extends Omit<ConnectionInput, "password"> {
   id: string;
   has_password: boolean;
   configured?: boolean;
+  sync?: SyncState | null;
   [key: string]: unknown;
 }
 
@@ -176,6 +210,22 @@ export const testConnection = (orgId: string, input: ConnectionInput) =>
  */
 export const discoverConnection = (orgId: string, input: ConnectionInput) =>
   apiPost<DiscoverResponse>(`/api/orgs/${orgId}/connections/discover`, input);
+
+/**
+ * Refresh a synced source, streaming progress. `full` re-reads everything,
+ * which is the only way deletions in Jira are noticed.
+ */
+export const syncConnection = (
+  orgId: string,
+  connectionId: string,
+  full = false,
+  signal?: AbortSignal,
+) =>
+  streamNdjson<SyncEvent>(
+    `/api/orgs/${orgId}/connections/${connectionId}/sync?full=${full}`,
+    {},
+    signal,
+  );
 
 /** A session that expired mid-use, as opposed to any other failure. */
 export function isUnauthorized(err: unknown): boolean {

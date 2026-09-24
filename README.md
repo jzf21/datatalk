@@ -118,6 +118,45 @@ commit. Re-runs are no-ops, so it is safe to repeat. `--owner-password` is only 
 when the account does not exist yet; `--bootstrap-warehouse` seeds the workspace's first
 data source from the current environment's `CLICKHOUSE_*` values.
 
+## How accurate is it?
+
+The agents are measured, not asserted. `datatalk-eval` seeds a deterministic
+synthetic business into two real warehouses, asks the production agents twenty
+questions with known answers, and scores by **execution match** — does a dataset
+the agent captured contain the reference answer? Column names and row order are
+forgiven; values and row counts are not.
+
+```bash
+docker compose up -d
+datatalk-eval seed        # load the fixture (~19k rows)
+datatalk-eval validate    # execute every reference query — no model calls
+datatalk-eval run         # the real thing
+```
+
+Latest baseline — 20 cases × 3 attempts × 2 arms, `gpt-oss-120b` at temperature 0:
+
+| | with context model | without |
+|---|---|---|
+| **Execution accuracy** | **86.7%** (52/60) | 33.3% (20/60) |
+| Source routing | 100% | 100% |
+| Consistency across 3 attempts | 95% | 95% |
+| Questions turning on a business definition | **15/15** | 2/15 |
+| Mean tokens / question | 10.9k | 4.9k |
+| Latency p50 / p95 | 3s / 7s | 2s / 6s |
+
+The two arms differ in exactly one thing: whether the workspace's curated
+context model is loaded. Same fixture, same prompts, same model. That +53-point
+gap is the product's central claim made falsifiable — that what an agent lacks
+is *meaning*, not schema. It fails on "revenue" because nobody told it cancelled
+orders don't count, not because it cannot write a `JOIN`.
+
+Cross-source questions are the weak spot (3/9): relating two warehouses without
+a join engine is the hardest thing the agent is asked to do, and the suite says
+so rather than hiding it.
+
+See **[docs/evals.md](docs/evals.md)** for how ground truth is computed, why the
+fixture is fingerprinted, and how to add a case.
+
 ## Tests
 
 ```bash
