@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useReducer, useRef } from "react";
+import { useCallback, useEffect, useReducer, useRef } from "react";
 
 import { describeNetworkError } from "@/lib/api/client";
 import type {
@@ -221,7 +221,9 @@ export function useNdjsonRun() {
     async (
       request: string,
       run: (signal: AbortSignal) => AsyncGenerator<RunEvent>,
-      onSaved?: (id: number | null) => void,
+      /** `signal` aborts if the run is stopped, reset or unmounted -- check it
+       *  before acting on the result after any further await. */
+      onSaved?: (id: number | null, signal: AbortSignal) => void,
     ) => {
       abortRef.current?.abort();
       const controller = new AbortController();
@@ -253,24 +255,36 @@ export function useNdjsonRun() {
           // The server always sends `done`, but a stream cut short would
           // otherwise leave the UI stuck in "streaming" forever.
           dispatch({ type: "event", event: { kind: "done", data: {} } });
-          onSaved?.(savedId);
+          onSaved?.(savedId, controller.signal);
         }
       } catch (err) {
+        // A reset, or a newer run, has already replaced this one's state; the
+        // abort it caused must not land on top as a late "stopped".
+        if (abortRef.current !== controller) return;
         if (controller.signal.aborted) dispatch({ type: "stop" });
         else dispatch({ type: "fail", message: describeNetworkError(err) });
-      } finally {
-        abortRef.current = null;
       }
+      // abortRef keeps the finished controller: aborting it after the stream
+      // ends is harmless, and is how stop/reset/unmount cancel whatever the
+      // onSaved callback is still awaiting.
     },
     [],
   );
+
+  // Leaving the page stops watching (the server persists the run regardless),
+  // so a stream from a page you left can never act on the page you are on.
+  useEffect(() => () => abortRef.current?.abort(), []);
 
   /**
    * Stops *watching*. The server runs generation on a daemon thread and
    * persists the result regardless, so the run will still appear in the list.
    */
   const stop = useCallback(() => abortRef.current?.abort(), []);
-  const reset = useCallback(() => dispatch({ type: "reset" }), []);
+  const reset = useCallback(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    dispatch({ type: "reset" });
+  }, []);
 
   return { state, start, stop, reset, running: state.phase === "streaming" };
 }

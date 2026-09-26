@@ -126,7 +126,11 @@ async function toApiError(res: Response): Promise<ApiError> {
   return new ApiError(res.status, detail);
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+async function request<T>(
+  path: string,
+  init?: RequestInit,
+  announce = true,
+): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
     // Auth is a session cookie on another origin: without this it is never
@@ -139,14 +143,23 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     const error = await toApiError(res);
-    announceApiError(error);
+    if (announce) announceApiError(error);
     throw error;
   }
   return (await res.json()) as T;
 }
 
-export function apiGet<T>(path: string, signal?: AbortSignal): Promise<T> {
-  return request<T>(path, { method: "GET", signal });
+/**
+ * `announce: false` is for background reads that render their own failure --
+ * the health poll runs on every page, and letting its 409 announce would
+ * bounce an unconnected workspace to settings from anywhere, every 30s.
+ */
+export function apiGet<T>(
+  path: string,
+  signal?: AbortSignal,
+  { announce = true }: { announce?: boolean } = {},
+): Promise<T> {
+  return request<T>(path, { method: "GET", signal }, announce);
 }
 
 export function apiPost<T>(

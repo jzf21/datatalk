@@ -1,10 +1,12 @@
 import Link from "next/link";
+import { Plus } from "lucide-react";
 
 import { ConnectionNotice } from "@/components/auth/connection-notice";
 import { NavLinks } from "./nav-links";
 import { LibraryRail } from "./library-rail";
 import { HealthPill } from "./health-pill";
 import { AccountMenu } from "./account-menu";
+import { Button } from "@/components/ui/button";
 
 /**
  * Rail + content.
@@ -26,7 +28,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <aside className="hidden w-[264px] shrink-0 flex-col border-r border-border md:flex">
         <div className="px-4 py-5">
           <Link
-            href="/reports"
+            href="/reports/new"
             className="display text-[22px] tracking-[-0.02em] text-ink-primary"
           >
             DataTalk
@@ -34,6 +36,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <p className="mt-1 text-[12px] text-ink-tertiary">
             Every number cites its query
           </p>
+        </div>
+
+        {/* The one action the whole product exists for, always one click away. */}
+        <div className="px-3 pb-4">
+          <Button asChild className="w-full justify-start">
+            <Link href="/reports/new">
+              <Plus aria-hidden />
+              New report
+            </Link>
+          </Button>
         </div>
 
         <NavLinks />

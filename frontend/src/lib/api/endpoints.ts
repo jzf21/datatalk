@@ -20,7 +20,8 @@ import type {
 // --- connection checkout ---------------------------------------------------
 
 export const getHealth = (signal?: AbortSignal) =>
-  apiGet<HealthResponse>("/api/health", signal);
+  // Quiet: the health pill shows "Not connected" itself (see apiGet).
+  apiGet<HealthResponse>("/api/health", signal, { announce: false });
 
 export const getSchema = (refresh = false) =>
   apiGet<SchemaResponse>(`/api/schema?refresh=${refresh}`);

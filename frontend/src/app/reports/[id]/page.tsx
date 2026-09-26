@@ -1,6 +1,7 @@
 "use client";
 
 import { use } from "react";
+import { MessageSquarePlus } from "lucide-react";
 
 import { PageBody, PageHeader } from "@/components/layout/page-header";
 import { DocumentView } from "@/components/doc/block-renderer";
@@ -9,7 +10,16 @@ import { SourcesRail } from "@/components/doc/sources-rail";
 import { QAThread } from "@/components/qa/qa-thread";
 import { useReport } from "@/lib/api/queries";
 import { formatRelativeTime } from "@/lib/format";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+
+/** The follow-up box sits under the whole report; this brings it to hand. */
+function focusFollowUp() {
+  const box = document.getElementById("question");
+  if (!box) return;
+  box.scrollIntoView({ block: "center" });
+  box.focus({ preventScroll: true });
+}
 
 export default function ReportPage({
   params,
@@ -54,6 +64,12 @@ export default function ReportPage({
       <PageHeader
         title={data.request}
         meta={`${data.queries.length} queries · ${rows.toLocaleString()} rows · ${formatRelativeTime(data.created_at)}`}
+        actions={
+          <Button variant="outline" size="sm" onClick={focusFollowUp}>
+            <MessageSquarePlus aria-hidden />
+            Ask a follow-up
+          </Button>
+        }
       />
       <PageBody>
         <SourcesProvider queries={data.queries}>

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 import { useDashboards, useReports } from "@/lib/api/queries";
+import { groupByDay } from "@/lib/library";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 
@@ -108,32 +109,4 @@ export function LibraryRail() {
       </ul>
     </div>
   );
-}
-
-function groupByDay(runs: Run[]): [string, Run[]][] {
-  const groups = new Map<string, Run[]>();
-  for (const run of runs) {
-    const label = dayLabel(run.createdAt);
-    const bucket = groups.get(label);
-    if (bucket) bucket.push(run);
-    else groups.set(label, [run]);
-  }
-  return [...groups.entries()];
-}
-
-function dayLabel(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "Earlier";
-  const today = new Date();
-  const days = Math.floor(
-    (startOfDay(today) - startOfDay(d)) / (24 * 60 * 60 * 1000),
-  );
-  if (days <= 0) return "Today";
-  if (days === 1) return "Yesterday";
-  if (days < 7) return d.toLocaleDateString(undefined, { weekday: "long" });
-  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-}
-
-function startOfDay(d: Date): number {
-  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
 }

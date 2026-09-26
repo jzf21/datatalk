@@ -3,26 +3,32 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
-  BookOpen,
   FileText,
   LayoutDashboard,
-  ListFilter,
+  Settings,
   Sparkles,
-  ScrollText,
-  Cable,
   type LucideIcon,
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
-const LINKS: { href: string; label: string; icon: LucideIcon }[] = [
+/** `section` is the path prefix that marks the link active, when it differs
+ *  from where the link goes. */
+const LINKS: {
+  href: string;
+  label: string;
+  icon: LucideIcon;
+  section?: string;
+}[] = [
   { href: "/reports", label: "Reports", icon: FileText },
   { href: "/dashboards", label: "Dashboards", icon: LayoutDashboard },
   { href: "/analyze", label: "Analyze", icon: Sparkles },
-  { href: "/memory", label: "House rules", icon: ScrollText },
-  { href: "/settings/connection", label: "Connection", icon: Cable },
-  { href: "/settings/scope", label: "Data scope", icon: ListFilter },
-  { href: "/settings/context", label: "Data context", icon: BookOpen },
+  {
+    href: "/settings/connection",
+    label: "Settings",
+    icon: Settings,
+    section: "/settings",
+  },
 ];
 
 export function NavLinks() {
@@ -31,8 +37,9 @@ export function NavLinks() {
   return (
     <nav className="px-2" aria-label="Main">
       <ul className="space-y-px">
-        {LINKS.map(({ href, label, icon: Icon }) => {
-          const active = pathname === href || pathname.startsWith(`${href}/`);
+        {LINKS.map(({ href, label, icon: Icon, section = href }) => {
+          const active =
+            pathname === section || pathname.startsWith(`${section}/`);
           return (
             <li key={href}>
               <Link
